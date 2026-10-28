@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pruefstellen-sourcing"
+version = "0.1.0"
+description = "Scrapes every HU inspection location in Germany from each Überwachungsorganisation."
+requires-python = ">=3.12"
+dependencies = [
+    "pandas",
+    "requests",
+    "beautifulsoup4",  # FSP list pages (HTML), TÜV Hessen preview HTML
+    "playwright",  # TÜV Hessen (Cloudflare-protected locator); one-time: python -m playwright install chromium
+    "python-dotenv",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ipykernel",
+    "matplotlib",  # maps in the KUES control notebook
+]
+
+# One package per ÜO (import name = slug) plus the shared `core`. To add an ÜO: add its slug to
+# `packages` and a package-dir line (see 0_instructions/storage_and_naming_convention.md).
+[tool.setuptools]
+packages = ["gtue", "dekra", "kues", "tuev_sued", "fsp", "tuev_hessen", "tuev_nord", "vuek", "tuev_rheinland", "tuev_thueringen", "hdp", "core"]
+
+[tool.setuptools.package-dir]
+gtue = "1_scrapers/gtue/src"
+dekra = "1_scrapers/dekra/src"
+kues = "1_scrapers/kues/src"
+tuev_sued = "1_scrapers/tuev_sued/src"
+fsp = "1_scrapers/fsp/src"
+tuev_hessen = "1_scrapers/tuev_hessen/src"
+tuev_nord = "1_scrapers/tuev_nord/src"
+vuek = "1_scrapers/vuek/src"
+tuev_rheinland = "1_scrapers/tuev_rheinland/src"
+tuev_thueringen = "1_scrapers/tuev_thueringen/src"
+hdp = "1_scrapers/hdp/src"
+core = "2_core"
+
+[tool.pytest.ini_options]
+testpaths = ["1_scrapers", "2_core"]
+# the gtue tests reuse helpers defined in 2_core/tests/test_grid.py (client, point_grid, ...)
+pythonpath = ["2_core/tests"]
+norecursedirs = ["output", "test_output", "notebook", "fixtures", ".*"]

@@ -1,0 +1,30 @@
+# secrets
+.env
+api-keys.md
+
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# run data (keep the .gitkeep placeholders of the empty scraper skeletons)
+**/output/*
+**/test_output/*
+!**/output/.gitkeep
+!**/test_output/.gitkeep
+
+# combined dataset and inputs we didn't scrape (README only)
+3_master_output/*
+!3_master_output/.gitkeep
+4_reference/*
+!4_reference/README.md
+
+# leftovers and scratch
+9_archive/
+_scratch/
+
+# archives
+*.zip
