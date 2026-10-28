@@ -1,0 +1,10 @@
+# rclone filter of the monthly Actions job, used for the pull from and the push to the Drive data folder.
+# First match wins. Paths are relative to the data folder (GDRIVE_FOLDER_ID on the Drive, PRUEFSTELLEN_DATA_ROOT on the runner).
+- /3_master_output/_dev/**
++ /1_scrapers/*/output/**
++ /3_master_output/**
++ /4_reference/geonames/**
++ /4_reference/geocode_cache/**
++ /4_reference/ground_truth/**
++ /4_reference/hdp/**
+- **

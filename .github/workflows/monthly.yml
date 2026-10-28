@@ -1,0 +1,268 @@
+# Monthly Prüfstellen pipeline: runs one `python -m core.monthly ... --confirm` command on the synced Drive data,
+# pushes the data back and reports to n8n. Interface: 0_instructions/n8n_actions_contract.md.
+# Inputs reach the shell only through env:, never as ${{ }} inside run: scripts.
+name: monthly
+
+on:
+  repository_dispatch:
+    types: [tuev-sued-plan, tuev-sued-check, scrape, build-without-tuev-sued, status]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: core.monthly command
+        type: choice
+        options: [status, tuev-sued-plan, tuev-sued-check, scrape, build-without-tuev-sued]
+        default: status
+      run_month:
+        description: "Cycle month YYYY-MM (optional)"
+        type: string
+        required: false
+      file:
+        description: "tuev-sued-check only: 3_master_output/_monthly/<run_month>/tuev_sued_upload/<name>.jsonl"
+        type: string
+        required: false
+
+concurrency:
+  group: competitor-scraper-monthly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  monthly:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      TZ: Europe/Berlin  # run folder names and the cycle month follow German time, as on Nikos's PC
+      RCLONE_VERSION: v1.68.2
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check inputs
+        id: in
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_COMMAND: ${{ github.event.action }}
+          DISPATCH_RUN_MONTH: ${{ github.event.client_payload.run_month }}
+          DISPATCH_FILE: ${{ github.event.client_payload.file }}
+          INPUT_COMMAND: ${{ inputs.command }}
+          INPUT_RUN_MONTH: ${{ inputs.run_month }}
+          INPUT_FILE: ${{ inputs.file }}
+        run: |
+          echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          echo "PRUEFSTELLEN_DATA_ROOT=$RUNNER_TEMP/data" >> "$GITHUB_ENV"
+          if [ "$EVENT" = repository_dispatch ]; then
+            command="$DISPATCH_COMMAND"; run_month="$DISPATCH_RUN_MONTH"; file="$DISPATCH_FILE"
+          else
+            command="$INPUT_COMMAND"; run_month="$INPUT_RUN_MONTH"; file="$INPUT_FILE"
+          fi
+          error=""
+          case "$command" in
+            tuev-sued-plan|tuev-sued-check|scrape|build-without-tuev-sued|status) ;;
+            *) error="invalid input: command"; command="unknown" ;;
+          esac
+          if [ -z "$error" ] && [ -n "$run_month" ] && ! [[ "$run_month" =~ ^20[0-9]{2}-(0[1-9]|1[0-2])$ ]]; then
+            error="invalid input: run_month (want YYYY-MM)"
+          fi
+          if [ -z "$error" ] && [ "$command" = tuev-sued-check ]; then
+            if [ -z "$run_month" ] || [ -z "$file" ]; then
+              error="invalid input: tuev-sued-check needs run_month and file"
+            elif ! [[ "$file" =~ ^3_master_output/_monthly/${run_month}/tuev_sued_upload/[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl$ ]]; then
+              error="invalid input: file (want 3_master_output/_monthly/<run_month>/tuev_sued_upload/<name>.jsonl)"
+            fi
+          elif [ -z "$error" ] && [ -n "$file" ]; then
+            error="invalid input: file is only for tuev-sued-check"
+          fi
+          if [ -n "$error" ]; then
+            run_month=""; file=""
+            echo "::error::$error"
+          fi
+          {
+            echo "command=$command"
+            echo "run_month=$run_month"
+            echo "file=$file"
+            echo "error=$error"
+          } >> "$GITHUB_OUTPUT"
+          echo "command $command, run_month ${run_month:-(none)}, file ${file:+given}"
+
+      - name: Check data sync setup
+        id: sync
+        if: steps.in.outputs.error == ''
+        env:
+          SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+        run: |
+          missing=""
+          [ -n "$SA_JSON" ] || missing="$missing secret:GDRIVE_SA_JSON"
+          [ -n "$FOLDER_ID" ] || missing="$missing variable:GDRIVE_FOLDER_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::data sync not set up, missing:$missing"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.sync.outputs.ready == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        if: steps.sync.outputs.ready == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the pipeline
+        if: steps.sync.outputs.ready == 'true'
+        run: python -m pip install -e ".[dev]"
+
+      - name: Install rclone
+        if: steps.sync.outputs.ready == 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          zip="rclone-${RCLONE_VERSION}-linux-amd64.zip"
+          curl -fsSLO "https://downloads.rclone.org/${RCLONE_VERSION}/${zip}"
+          curl -fsSL -o rclone.sums "https://downloads.rclone.org/${RCLONE_VERSION}/SHA256SUMS"
+          grep " ${zip}\$" rclone.sums | sha256sum -c -
+          unzip -q "$zip"
+          mkdir -p "$RUNNER_TEMP/bin"
+          mv "rclone-${RCLONE_VERSION}-linux-amd64/rclone" "$RUNNER_TEMP/bin/"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/rclone" version | head -1
+
+      - name: Pull data from Google Drive
+        id: pull
+        if: steps.sync.outputs.ready == 'true'
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}  # the service account sees only this folder
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+        run: |
+          mkdir -p "$PRUEFSTELLEN_DATA_ROOT"
+          rclone copy "gdrive:" "$PRUEFSTELLEN_DATA_ROOT" \
+            --filter-from .github/rclone-filter.txt --fast-list --transfers 8 \
+            --stats 1m --stats-one-line --stats-log-level NOTICE
+          echo "pulled $(find "$PRUEFSTELLEN_DATA_ROOT" -type f | wc -l) files"
+
+      - name: Install Playwright Chromium (scrape only)
+        if: steps.pull.outcome == 'success' && steps.in.outputs.command == 'scrape'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run core.monthly
+        id: run
+        if: steps.pull.outcome == 'success'
+        timeout-minutes: 330
+        continue-on-error: true  # the push, callback and final exit below still run; the job ends with this step's code
+        env:
+          COMMAND: ${{ steps.in.outputs.command }}
+          RUN_MONTH: ${{ steps.in.outputs.run_month }}
+          UPLOAD_FILE: ${{ steps.in.outputs.file }}
+          GTUE_API_KEY: ${{ secrets.GTUE_API_KEY }}
+        run: |
+          set +e
+          case "$COMMAND" in
+            tuev-sued-plan)          args=(tuev-sued plan) ;;
+            tuev-sued-check)         args=(tuev-sued check --file "$PRUEFSTELLEN_DATA_ROOT/$UPLOAD_FILE") ;;
+            scrape)                  args=(scrape) ;;
+            build-without-tuev-sued) args=(build --without-tuev-sued) ;;
+            status)                  args=(status); [ -n "$RUN_MONTH" ] && args+=(--month "$RUN_MONTH") ;;
+          esac
+          cycle=$(python -c "from datetime import date; from core.monthly import cycle_month; print(cycle_month(date.today()))")
+          if [ -n "$RUN_MONTH" ] && [ -n "$cycle" ] && [ "$COMMAND" != status ] && [ "$RUN_MONTH" != "$cycle" ]; then
+            echo "::warning::run_month $RUN_MONTH differs from the runner's cycle month $cycle; core.monthly uses $cycle"
+          fi
+          python -m core.monthly "${args[@]}" --confirm
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Push data to Google Drive
+        id: push
+        if: always() && steps.pull.outcome == 'success'
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+        run: |
+          # copy, never sync: nothing on the Drive is deleted; --update keeps files that are newer on the Drive
+          rclone copy "$PRUEFSTELLEN_DATA_ROOT" "gdrive:" \
+            --filter-from .github/rclone-filter.txt --fast-list --transfers 8 --update \
+            --stats 1m --stats-one-line --stats-log-level NOTICE
+
+      - name: Build callback
+        id: result
+        if: always()
+        env:
+          COMMAND: ${{ steps.in.outputs.command }}
+          RUN_MONTH: ${{ steps.in.outputs.run_month }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          INPUT_ERROR: ${{ steps.in.outputs.error }}
+          SYNC_READY: ${{ steps.sync.outputs.ready }}
+          PULL_OUTCOME: ${{ steps.pull.outcome }}
+          RUN_OUTCOME: ${{ steps.run.outcome }}
+          MONTHLY_CODE: ${{ steps.run.outputs.code }}
+          PUSH_OUTCOME: ${{ steps.push.outcome }}
+        run: |
+          if [ -n "$INPUT_ERROR" ]; then STOP_REASON="$INPUT_ERROR"
+          elif [ "$SYNC_READY" != true ]; then STOP_REASON="data sync not set up"
+          elif [ "$PULL_OUTCOME" != success ]; then STOP_REASON="data pull from Google Drive failed"
+          elif [ "$RUN_OUTCOME" = skipped ]; then STOP_REASON="setup failed before core.monthly (Python, packages or Playwright)"
+          else STOP_REASON=""
+          fi
+          export STOP_REASON
+          export DATA_ROOT="$PRUEFSTELLEN_DATA_ROOT" PAYLOAD_FILE="$RUNNER_TEMP/callback.json"
+          script=.github/scripts/monthly_callback.py
+          if [ ! -f "$script" ]; then  # checkout skipped: fetch nothing, build the stop payload inline
+            python3 - <<'PY'
+          import json, os
+          reason = os.environ.get("STOP_REASON") or "setup failed before checkout"
+          body = {"command": os.environ.get("COMMAND", ""), "run_url": os.environ["RUN_URL"],
+                  "status": {"exit_code": 2, "phase": "stopped", "needs_human": [reason]}, "snippet_js": None}
+          open(os.environ["PAYLOAD_FILE"], "w", encoding="utf-8").write(json.dumps(body))
+          open(os.environ["GITHUB_OUTPUT"], "a").write("exit_code=2\n")
+          print("callback: phase stopped, exit 2")
+          PY
+          else
+            python3 "$script"
+          fi
+
+      - name: Send status to n8n
+        if: always()
+        env:
+          N8N_CALLBACK_TOKEN: ${{ secrets.N8N_CALLBACK_TOKEN }}
+          CALLBACK_URL: https://holdeineplakette.app.n8n.cloud/webhook/competitor-scraper/status
+        run: |
+          if [ -z "$N8N_CALLBACK_TOKEN" ]; then
+            echo "::error::secret N8N_CALLBACK_TOKEN is not set: no callback sent"
+            exit 1
+          fi
+          if [ ! -f "$RUNNER_TEMP/callback.json" ]; then
+            echo "::error::no callback body was built"
+            exit 1
+          fi
+          hdr="$RUNNER_TEMP/callback.hdr"
+          umask 077
+          printf 'X-Scraper-Token: %s\n' "$N8N_CALLBACK_TOKEN" > "$hdr"
+          curl -fsS --retry 3 --retry-all-errors --max-time 60 -o /dev/null \
+            -H "Content-Type: application/json" -H @"$hdr" \
+            --data-binary @"$RUNNER_TEMP/callback.json" "$CALLBACK_URL"
+          rm -f "$hdr"
+          echo "callback sent"
+
+      - name: Exit with the core.monthly code
+        if: always()
+        env:
+          FINAL_CODE: ${{ steps.result.outputs.exit_code }}
+        run: |
+          code="${FINAL_CODE:-2}"
+          echo "exit $code"
+          exit "$code"
