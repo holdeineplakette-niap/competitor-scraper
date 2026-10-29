@@ -26,5 +26,8 @@ __pycache__/
 9_archive/
 _scratch/
 
+# staging copy of the data for the first Drive upload
+GDrive_Uploads/
+
 # archives
 *.zip
