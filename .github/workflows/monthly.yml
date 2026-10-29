@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 355
     env:
       TZ: Europe/Berlin  # run folder names and the cycle month follow German time, as on Nikos's PC
-      RCLONE_VERSION: v1.68.2
+      INSTALL_RCLONE_VERSION: v1.68.2  # not RCLONE_*: rclone reads every RCLONE_* variable as a flag
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Check inputs
@@ -127,13 +127,13 @@ jobs:
         if: steps.sync.outputs.ready == 'true'
         run: |
           cd "$RUNNER_TEMP"
-          zip="rclone-${RCLONE_VERSION}-linux-amd64.zip"
-          curl -fsSLO "https://downloads.rclone.org/${RCLONE_VERSION}/${zip}"
-          curl -fsSL -o rclone.sums "https://downloads.rclone.org/${RCLONE_VERSION}/SHA256SUMS"
+          zip="rclone-${INSTALL_RCLONE_VERSION}-linux-amd64.zip"
+          curl -fsSLO "https://downloads.rclone.org/${INSTALL_RCLONE_VERSION}/${zip}"
+          curl -fsSL -o rclone.sums "https://downloads.rclone.org/${INSTALL_RCLONE_VERSION}/SHA256SUMS"
           grep " ${zip}\$" rclone.sums | sha256sum -c -
           unzip -q "$zip"
           mkdir -p "$RUNNER_TEMP/bin"
-          mv "rclone-${RCLONE_VERSION}-linux-amd64/rclone" "$RUNNER_TEMP/bin/"
+          mv "rclone-${INSTALL_RCLONE_VERSION}-linux-amd64/rclone" "$RUNNER_TEMP/bin/"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/bin/rclone" version | head -1
 
