@@ -500,7 +500,7 @@ def render_md(s: dict) -> str:
         L.append(f"- {t['message']}")
     b = s.get("build") or {}
     L += ["", "## Master", f"- status: {b.get('status', 'not built')}" + (f" ({b['reason']})" if b.get("reason") else "")]
-    for k in ("master_dir", "hubspot_changes", "hubspot_changes_overview", "hubspot_import", "hubspot_excluded", "master_summary"):
+    for k in ("master_dir", "hubspot_changes", "hubspot_changes_overview", "hubspot_api", "hubspot_import", "hubspot_excluded", "master_summary"):
         if b.get(k):
             L.append(f"- {k}: {b[k]}")
     if b.get("changes"):
@@ -565,6 +565,9 @@ def build_record(out_dir: Path, summary: dict, root: Path) -> dict:
         for tag in ("", "_unverified"):  # the names hubspot_export.files_for_run gives them
             if (out_dir / f"{key}{tag}_{month}.csv").exists():
                 files[key] = relative(out_dir / f"{key}{tag}_{month}.csv", root)
+    for tag in ("", "_unverified"):  # the API batches n8n sends to HubSpot after the Slack approval
+        if (out_dir / f"hubspot_api{tag}_{month}.json").exists():
+            files["hubspot_api"] = relative(out_dir / f"hubspot_api{tag}_{month}.json", root)
     checks = summary.get("checks") or []
     lc = summary.get("lifecycle") or {}
     return {"status": summary.get("status", "FAIL"), "master_dir": relative(out_dir, root),
@@ -647,7 +650,7 @@ def _build(ctx: Context, month: str, without_tuev_sued: bool = False, accept_ret
         fresh = fresh_tuev_sued(root, since_tuev)
         if fresh is None and not without_tuev_sued:
             s = _set(ctx, month, phase="waiting_for_tuev_sued",
-                     next_action="waiting for the TÜV SÜD upload; after the timeout n8n runs `build --without-tuev-sued`")
+                     next_action="waiting for TÜV SÜD: post the .jsonl in the TÜV SÜD thread in Slack; without it the master is built without TÜV SÜD on the 3rd working day")
             ctx.say("no fresh TÜV SÜD run: the master waits for it")
             return Outcome(s["exit_code"], s, "waiting for TÜV SÜD")
         reason = ensure_hdp(ctx, month, now)
@@ -678,7 +681,7 @@ def _build(ctx: Context, month: str, without_tuev_sued: bool = False, accept_ret
         rec.update(pins=pins, not_refreshed=stale, without_tuev_sued=without_tuev_sued, accept_retirements=accept_retirements,
                    tuev_sued_run=fresh.run_dir.name if fresh is not None else None)
         guard = any("mass retirement" in c for c in rec.get("failed_checks", []))
-        nxt = ("Slack approval of hubspot_changes, then the HubSpot import" if rec["status"] == "PASS" else
+        nxt = ("approve the HubSpot changes in Slack (Approve / Reject in the next message); nothing reaches HubSpot before" if rec["status"] == "PASS" else
                "mass-retirement guard tripped: a human decides; to accept, move the month folder to 9_archive/ and run "
                "build --accept-retirements" if guard else "a hard master check failed: see master_summary.md")
         s = _set(ctx, month, phase="built" if rec["status"] == "PASS" else "build_failed", next_action=nxt, build=rec)
@@ -742,7 +745,7 @@ def scrape(ctx: Context, *, confirm: bool = False, force=()) -> Outcome:
     if fresh_tuev_sued(ctx.root, cycle_start(ctx, month)) is not None:
         return _build(ctx, month)
     s = _set(ctx, month, phase="waiting_for_tuev_sued",
-             next_action="waiting for the TÜV SÜD upload; after the timeout n8n runs `build --without-tuev-sued`")
+             next_action="waiting for TÜV SÜD: post the .jsonl in the TÜV SÜD thread in Slack; without it the master is built without TÜV SÜD on the 3rd working day")
     ctx.say("scrape done; waiting for TÜV SÜD")
     return Outcome(s["exit_code"], s, "waiting for TÜV SÜD")
 
@@ -766,7 +769,7 @@ def _after_tuev_build(ctx: Context, month: str, folder: Path) -> Outcome:
         return Outcome(s["exit_code"], s)
     if _scrape_done(load_status(month, ctx.root)):
         return _build(ctx, month)
-    s = _set(ctx, month, phase="waiting_for_scrape", next_action="TÜV SÜD is ready; the scrape on the 1st builds the master")
+    s = _set(ctx, month, phase="waiting_for_scrape", next_action="TÜV SÜD is ready; the master is built right after the scrape of the 1st")
     return Outcome(s["exit_code"], s)
 
 
@@ -806,7 +809,7 @@ def tuev_sued(ctx: Context, action: str, *, confirm: bool = False, file: str | P
         if p is None:
             s = _set(ctx, month, tuev_sued=_tuev_record(folder, ctx.root, "READY_TO_BUILD", "every planned pass is imported: run `tuev-sued build`"))
             return Outcome(s["exit_code"], s)
-        s = _set(ctx, month, phase="tuev_sued_waiting_for_upload", next_action="run the snippet in the browser and upload the .jsonl",
+        s = _set(ctx, month, phase="tuev_sued_waiting_for_upload", next_action="run the snippet in the browser and post the .jsonl in the TÜV SÜD thread",
                  tuev_sued=_tuev_record(folder, ctx.root, "WAITING_FOR_UPLOAD", f"pass {p.pass_no}: {len(p.queries)} PLZ", p))
         ctx.say(f"TÜV SÜD snippet: {p.js_path}")
         return Outcome(s["exit_code"], s)
@@ -829,7 +832,7 @@ def tuev_sued(ctx: Context, action: str, *, confirm: bool = False, file: str | P
         tuev_run.build(folder, centroids=ctx.centroids, root=ctx.root, say=ctx.say)
         return _after_tuev_build(ctx, month, folder)
     if c.status == "INCOMPLETE" and c.next_plan is not None:
-        s = _set(ctx, month, phase="tuev_sued_next_pass", next_action="post the next snippet in the thread; Nikos runs it and uploads the .jsonl",
+        s = _set(ctx, month, phase="tuev_sued_next_pass", next_action="run the next snippet from the TÜV SÜD thread and post its .jsonl there",
                  tuev_sued=_tuev_record(folder, ctx.root, "NEXT_PASS", c.message, c.next_plan))
         return Outcome(s["exit_code"], s)
     if c.status == "FAIL":  # passes used up: the run is built with labelled exports and does not feed the master

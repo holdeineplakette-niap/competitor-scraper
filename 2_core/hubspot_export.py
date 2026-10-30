@@ -3,6 +3,7 @@
     first import   hubspot_import_YYYY-MM.csv    every ACTIVE row (the first master has no earlier month)
     every month    hubspot_changes_YYYY-MM.csv   only new / changed / retired / reactivated rows against the previous master
                    hubspot_changes_overview_YYYY-MM.csv   one line per change (for people; not for the import)
+                   hubspot_api_YYYY-MM.json      the same changes as HubSpot batch API calls (n8n sends them after the Slack approval)
     both           hubspot_excluded_YYYY-MM.csv  rows kept out of the import and why
 
 Rules
@@ -25,7 +26,9 @@ Rules
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -75,6 +78,8 @@ UO_OPTIONS = {"GTÜ": "GTÜ", "KÜS": "KÜS", "DEKRA": "DEKRA", "TÜV SÜD": "T�
 YES_NO = {"Yes": "Ja", "No": "Nein"}
 STATUS_VALUES = {"active": "aktiv", "retired": "scraper-geschlossen"}
 DECIMAL_COMMA = True  # the portal reads geo_lat / geo_lng in the German number format
+API_BATCH = 100  # HubSpot's limit per batch call
+CHANGE_KINDS = ("new", "reactivated", "changed", "retired")
 OVERVIEW_COLUMNS = ["change", ID, "name", "uo", "city", "fields"]
 EXCLUDED_COLUMNS = ["master_id", "name", "zip", "city", "reason"]
 
@@ -193,6 +198,43 @@ def files_for_run(prev: pd.DataFrame | None, master: pd.DataFrame, month: str, t
     return files
 
 
+def api_payload(imp: pd.DataFrame, ov: pd.DataFrame, month: str) -> dict:
+    """The monthly changes as HubSpot batch API calls, for n8n to send after the Slack approval.
+
+    new -> batch/upsert on the unique `prufstellenid_datascraper`, so a second send never creates a second company; reactivated,
+    changed, retired -> batch/update by the same property, so a site HubSpot does not have fails instead of being created.
+    Empty cells are left out (the API clears a field sent as ""), except the retired-on date of a reactivated site, which is
+    cleared on purpose (the CSV import cannot do that). lat / lng go with a decimal point: the API takes no German format."""
+    kind = dict(zip(ov[ID], ov["change"]))
+    if set(kind) != set(imp[ID]):
+        raise ValueError("hubspot_changes and its overview list different sites")
+    upsert, update = [], []
+    for r in imp.to_dict("records"):
+        props = {h: v for h, v in r.items() if h != ID and v != ""}
+        for h in (PROPERTIES["lat"], PROPERTIES["lng"]):
+            if h in props:
+                props[h] = props[h].replace(",", ".")
+        if kind[r[ID]] == "reactivated":
+            props[RETIRED_ON] = ""
+        (upsert if kind[r[ID]] == "new" else update).append({"id": r[ID], "idProperty": ID, "properties": props})
+    counts = Counter(kind.values())
+    batches = lambda xs: [xs[i:i + API_BATCH] for i in range(0, len(xs), API_BATCH)]
+    return {"month": month, "id_property": ID, "rows": len(imp), "counts": {k: counts.get(k, 0) for k in CHANGE_KINDS},
+            "upsert": batches(upsert), "update": batches(update)}
+
+
+def api_for_run(files: dict[str, pd.DataFrame], month: str, tag: str = "") -> tuple[str, dict] | None:
+    """(file name, payload) of the monthly changes in `files` (from files_for_run); None for a first import."""
+    imp = files.get(f"hubspot_changes{tag}_{month}.csv")
+    if imp is None:
+        return None
+    return f"hubspot_api{tag}_{month}.json", api_payload(imp, files[f"hubspot_changes_overview{tag}_{month}.csv"], month)
+
+
+def write_api_json(payload: dict, path: Path) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def test_sample(imp: pd.DataFrame, n: int = 50) -> pd.DataFrame:
     """~n rows of an import file for the first test import, chosen to meet every risky case (deterministic):
     rows that share a website domain (does HubSpot merge them?), street-less rows, every ÜO, Stützpunkt = Ja, rows without
@@ -247,13 +289,17 @@ def main(argv=None) -> int:
     files = files_for_run(prev, master, month)
     if a.sample and prev is None:
         files[f"hubspot_test_sample_{month}.csv"] = test_sample(files[f"hubspot_import_{month}.csv"], a.sample)
-    clash = [out / n for n in files if (out / n).exists()]
+    api = api_for_run(files, month)
+    clash = [out / n for n in [*files, *([api[0]] if api else [])] if (out / n).exists()]
     if clash:  # nothing is written if any file exists: never a half-written set
         print("not overwritten, already exist: " + ", ".join(str(c) for c in clash))
         return 2
     for name, frame in files.items():
         write_hubspot_csv(frame, out / name)
         print(f"{out / name}: {len(frame)} rows")
+    if api:
+        write_api_json(api[1], out / api[0])
+        print(f"{out / api[0]}: {api[1]['rows']} rows")
     return 0
 
 

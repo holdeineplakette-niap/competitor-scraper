@@ -601,8 +601,12 @@ def _write(mode, month, started_at, root, status, master, change, merge_log, ext
     tag = "" if status == "PASS" else "_unverified"
     write_csv(master, out / f"pruefstellen_master{tag}_{month}.csv")
     write_csv(change, out / f"diff_{month}.csv")
-    for name, frame in hubspot_export.files_for_run(prev, master, month, tag).items():  # HubSpot import files (see hubspot_export)
+    hub = hubspot_export.files_for_run(prev, master, month, tag)
+    for name, frame in hub.items():  # HubSpot import files (see hubspot_export)
         hubspot_export.write_hubspot_csv(frame, out / name)
+    api = hubspot_export.api_for_run(hub, month, tag)  # the same changes as API batches for n8n
+    if api is not None:
+        hubspot_export.write_api_json(api[1], out / api[0])
     write_csv(merge_log, out / "merge_log.csv")
     if hdp_frames is not None:
         write_csv(hdp_frames[0], out / hdp_removal.REMOVED_FILE)

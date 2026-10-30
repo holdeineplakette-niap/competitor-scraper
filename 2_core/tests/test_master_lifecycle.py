@@ -1,5 +1,6 @@
 """Lifecycle of master rows (retired / reactivated, needs_review only for status changes) and the HubSpot import files."""
 
+import json
 from datetime import datetime
 
 import pandas as pd
@@ -228,3 +229,38 @@ def test_a_run_writes_the_hubspot_files_next_to_the_master(tmp_path, old_inputs_
     assert ch["compscraper_business_status"].tolist() == ["scraper-geschlossen"] and ov["change"].tolist() == ["retired"]
     assert ch["compscraper_closedondate"].tolist() == ["2026-11-03"]
     assert not (m2.out_dir / "hubspot_import_2026-11.csv").exists()
+    api = json.loads((m2.out_dir / "hubspot_api_2026-11.json").read_text(encoding="utf-8"))
+    assert api["counts"] == {"new": 0, "reactivated": 0, "changed": 0, "retired": 1} and api["upsert"] == []
+    assert not (m1.out_dir / "hubspot_api_2026-10.json").exists()  # a first import has no API file
+
+
+def test_the_api_file_upserts_new_sites_updates_the_rest_and_never_sends_blanks():
+    prev = frame(mrow("PS-000001"), mrow("PS-000002"), mrow("PS-000003"), mrow("PS-000004", status="retired", retired_on="2026-10-20"))
+    cur = frame(mrow("PS-000001", phone="0351 999", lat="51.05", lng="13.7"),
+                mrow("PS-000002"),
+                mrow("PS-000003", status="retired", retired_on="2026-11-03", needs_review="True", needs_review_reason="retired"),
+                mrow("PS-000004", needs_review="True", needs_review_reason="reactivated"),
+                mrow("PS-000005", name="Neu", psp="Yes"))
+    imp, ov, _ = hx.monthly_changes(prev, cur)
+    api = hx.api_payload(imp, ov, "2026-11")
+    assert api["counts"] == {"new": 1, "reactivated": 1, "changed": 1, "retired": 1} and api["rows"] == 4
+    assert api["id_property"] == "prufstellenid_datascraper"
+    new = api["upsert"][0][0]
+    assert new["id"] == "PS-000005" and new["idProperty"] == "prufstellenid_datascraper" and new["properties"]["name"] == "Neu"
+    assert new["properties"]["stutzpunkt"] == "Ja" and "prufstellenid_datascraper" not in new["properties"]
+    upd = {u["id"]: u["properties"] for u in api["update"][0]}
+    assert upd["PS-000001"] == {"company_datasource": "competitor_scraper", "phone": "0351 999", "geo_lat": "51.05", "geo_lng": "13.7"}
+    assert all(v != "" for mid, p in upd.items() if mid != "PS-000004" for v in p.values())  # no blanks sent
+    assert upd["PS-000003"]["compscraper_business_status"] == "scraper-geschlossen" and upd["PS-000003"]["compscraper_closedondate"] == "2026-11-03"
+    assert upd["PS-000004"]["compscraper_closedondate"] == "" and upd["PS-000004"]["compscraper_business_status"] == "aktiv"  # cleared on purpose
+    assert "stutzpunkt" not in upd["PS-000004"]  # psp No: never Nein, never blank
+    with pytest.raises(ValueError, match="different sites"):
+        hx.api_payload(imp, ov.iloc[1:], "2026-11")
+
+
+def test_the_api_file_splits_into_batches_of_100():
+    prev = frame(mrow("PS-000001"))
+    cur = frame(mrow("PS-000001"), *[mrow(f"PS-{i:06d}") for i in range(2, 253)])
+    imp, ov, _ = hx.monthly_changes(prev, cur)
+    api = hx.api_payload(imp, ov, "2026-11")
+    assert [len(b) for b in api["upsert"]] == [100, 100, 51] and api["update"] == []
