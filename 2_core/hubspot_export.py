@@ -16,8 +16,8 @@ Rules
 - Only scraped fields are exported. Owner, lifecycle stage, notes and every other field edited by Sales or M&A never are.
 - Changed rows carry the id plus ONLY the changed fields; retired rows carry the id, the status and the retired-on date. The
   other cells stay empty, so the import must not overwrite existing values with blanks (HubSpot's default).
-- Nothing is ever deleted: a retired site only gets `business_status = scraper-geschlossen` and the date in `compscraper_closedondate`.
-  Known limit: a REACTIVATED site gets `business_status = aktiv`, but an empty cell never clears the old date in HubSpot (blanks do
+- Nothing is ever deleted: a retired site only gets `compscraper_business_status = scraper-geschlossen` and the date in
+  `compscraper_closedondate`. Known limit: a REACTIVATED site gets `compscraper_business_status = aktiv`, but an empty cell never clears the old date in HubSpot (blanks do
   not overwrite), so its `compscraper_closedondate` has to be cleared by hand; the overview file lists every reactivation.
 - Rows whose own-site status is unresolved (`hdp_match_unresolved`) are kept out until a human decides, and listed.
 """
@@ -53,13 +53,14 @@ PROPERTIES: dict[str, str] = {
     "phone": "phone",
     "email": "unternehmens_e_mail",
     "website": "website",  # the standard Website URL (single-line text); NOT the company domain
-    "uo": "stutzpunkt_pruforganisation",  # checkbox property: the value must be the option's internal name
-    "psp": "stutzpunkt",  # dropdown Ja / Nein
+    "uo": "stutzpunkt_pruforganisation",  # label "Prüforganisation": the operating ÜO for every site, NOT a Prüfstützpunkt flag (that is `stutzpunkt`); checkbox property: the value must be the option's internal name
+    "psp": "stutzpunkt",  # dropdown Ja / Nein; only Ja is written (see to_hubspot)
     "lat": "geo_lat",  # numbers in the German decimal format (comma)
     "lng": "geo_lng",
-    "address_incomplete": "compscraper_adresse_unvollstandig",  # dropdown Ja / Nein
-    "status": "business_status",  # single-line text: aktiv / scraper-geschlossen
-    "retired_on": "compscraper_closedondate",  # date the site was retired (YYYY-MM-DD); empty for active sites
+    "address_incomplete": "compscraper_adresse_unvollstandig",  # single checkbox: true / false (not Ja / Nein, 2026-10-29)
+    # own property since 2026-10-29 (the older `business_status` belongs to Samuel Böhm and is not ours to write)
+    "status": "compscraper_business_status",  # aktiv / scraper-geschlossen
+    "retired_on": "compscraper_closedondate",  # date picker since 2026-10-29 (YYYY-MM-DD); empty for active sites
 }
 DATASOURCE_PROPERTY = "company_datasource"  # dropdown, one option with the internal value below
 ID = PROPERTIES["master_id"]
@@ -104,11 +105,13 @@ def to_hubspot(master: pd.DataFrame) -> pd.DataFrame:
         if col == "country":
             out[head] = "Germany"
         elif col == "address_incomplete":
-            out[head] = ["Ja" if "address_incomplete" in _flags(r) else "Nein" for r in m.to_dict("records")]
+            out[head] = ["true" if "address_incomplete" in _flags(r) else "false" for r in m.to_dict("records")]
         elif col == "uo":
             out[head] = m[col].map(UO_OPTIONS)
         elif col == "psp":
-            out[head] = m[col].map(YES_NO)
+            # only Ja is written: the master's "No" means unknown outside KÜS, and HubSpot's Ja wins over a KÜS "No" too
+            # (50 restored 2026-10-29); an empty cell leaves HubSpot's value alone on import
+            out[head] = m[col].map({"Yes": "Ja", "No": ""})
         elif col == "status":
             out[head] = m[col].map(STATUS_VALUES)
         elif col in ("lat", "lng") and DECIMAL_COMMA:
@@ -206,7 +209,7 @@ def test_sample(imp: pd.DataFrame, n: int = 50) -> pd.DataFrame:
     if len(shared):
         take(shared[shared == shared.value_counts().index[0]].index, 6)  # the most shared domain
         take(shared[shared != shared.value_counts().index[0]].sort_values().index, 4)
-    take(imp.index[imp["compscraper_adresse_unvollstandig"] == "Ja"], 4)
+    take(imp.index[imp["compscraper_adresse_unvollstandig"] == "true"], 4)
     for uo in sorted(imp["stutzpunkt_pruforganisation"].unique()):
         take(imp.index[imp["stutzpunkt_pruforganisation"] == uo], 2)
     take(imp.index[imp["stutzpunkt"] == "Ja"], 3)

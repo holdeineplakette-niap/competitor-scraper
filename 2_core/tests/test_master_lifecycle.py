@@ -163,7 +163,7 @@ def test_the_first_import_has_only_active_rows_with_hubspot_headers_and_constant
     assert hx.ID == "prufstellenid_datascraper" and hx.DATASOURCE_PROPERTY == "company_datasource"
     r = imp.iloc[0]
     assert r["company_datasource"] == "competitor_scraper" and r["country"] == "Germany" and r["zip"] == "01067"
-    assert r["compscraper_adresse_unvollstandig"] == "Ja" and r["stutzpunkt"] == "Ja" and r["business_status"] == "aktiv"
+    assert r["compscraper_adresse_unvollstandig"] == "true" and r["stutzpunkt"] == "Ja" and r["compscraper_business_status"] == "aktiv"
     assert r["compscraper_closedondate"] == "" and "compscraper_closedondate" in imp.columns  # active: no date
     assert r["stutzpunkt_pruforganisation"] == "TÜV"  # TÜV Süd's option has the internal name "TÜV"
     assert (r["geo_lat"], r["geo_lng"]) == ("51,123456", "13,7")  # German decimal comma
@@ -178,7 +178,7 @@ def test_every_uo_has_a_hubspot_option_and_an_unknown_value_stops_the_export():
     assert hx.UO_OPTIONS["TÜV NORD"] == "TÜV Nord" and hx.UO_OPTIONS["VÜK"] == "VÜK" and hx.UO_OPTIONS["TÜV Saarland"] == "TÜV Saarland"
     with pytest.raises(ValueError, match="without a HubSpot value"):
         hx.first_import(frame(mrow("PS-000001", uo="Neue ÜO")))
-    assert hx.first_import(frame(mrow("PS-000001", psp="No")))[0].iloc[0]["stutzpunkt"] == "Nein"
+    assert hx.first_import(frame(mrow("PS-000001", psp="No")))[0].iloc[0]["stutzpunkt"] == ""  # never Nein: HubSpot keeps its value
 
 
 def test_a_possible_own_site_is_kept_out_of_the_import_and_listed():
@@ -203,11 +203,11 @@ def test_the_monthly_file_has_new_changed_retired_and_reactivated_rows_only():
     changed = rows_["PS-000002"]
     assert changed["phone"] == "0351 999" and changed["name"] == "" and changed["city"] == "" and changed["company_datasource"] == "competitor_scraper"  # sparse
     retired = rows_["PS-000003"]
-    assert retired["business_status"] == "scraper-geschlossen" and retired["phone"] == "" and retired["name"] == "" and retired["geo_lat"] == ""
+    assert retired["compscraper_business_status"] == "scraper-geschlossen" and retired["phone"] == "" and retired["name"] == "" and retired["geo_lat"] == ""
     assert retired["compscraper_closedondate"] == "2026-11-03"  # the date goes with the status
     assert rows_["PS-000004"]["compscraper_closedondate"] == "" and changed["compscraper_closedondate"] == ""  # nothing else carries a date
     assert rows_["PS-000006"]["name"] == "Neu" and rows_["PS-000006"]["country"] == "Germany"  # a new row is complete
-    assert rows_["PS-000004"]["business_status"] == "aktiv" and rows_["PS-000004"]["name"] != ""
+    assert rows_["PS-000004"]["compscraper_business_status"] == "aktiv" and rows_["PS-000004"]["name"] != ""
     assert "PS-000001" not in rows_ and "PS-000005" not in rows_
 
 
@@ -219,12 +219,12 @@ def test_a_run_writes_the_hubspot_files_next_to_the_master(tmp_path, old_inputs_
     assert not text.startswith("﻿") and text.splitlines()[0] == ",".join(hx.HEADERS)
     df = pd.read_csv(first, sep=",", dtype=str, keep_default_na=False)
     assert len(df) == len(m1.master) and set(df["company_datasource"]) == {"competitor_scraper"} and set(df["country"]) == {"Germany"}
-    assert set(df["business_status"]) == {"aktiv"} and set(df["stutzpunkt"]) <= {"Ja", "Nein"}
+    assert set(df["compscraper_business_status"]) == {"aktiv"} and set(df["stutzpunkt"]) <= {"Ja", ""}
     assert not (m1.out_dir / "hubspot_changes_2026-10.csv").exists()
     write_source(tmp_path, "gtue", rows("G", 2), run="2026-11-02_1000_full")
     m2 = go(tmp_path, "official", at=T2, confirm=True, accept_retirements=True)
     ch = pd.read_csv(m2.out_dir / "hubspot_changes_2026-11.csv", sep=",", dtype=str, keep_default_na=False)
     ov = pd.read_csv(m2.out_dir / "hubspot_changes_overview_2026-11.csv", sep=",", dtype=str, keep_default_na=False)
-    assert ch["business_status"].tolist() == ["scraper-geschlossen"] and ov["change"].tolist() == ["retired"]
+    assert ch["compscraper_business_status"].tolist() == ["scraper-geschlossen"] and ov["change"].tolist() == ["retired"]
     assert ch["compscraper_closedondate"].tolist() == ["2026-11-03"]
     assert not (m2.out_dir / "hubspot_import_2026-11.csv").exists()
