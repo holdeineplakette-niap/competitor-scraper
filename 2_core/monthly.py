@@ -681,7 +681,7 @@ def _build(ctx: Context, month: str, without_tuev_sued: bool = False, accept_ret
         rec.update(pins=pins, not_refreshed=stale, without_tuev_sued=without_tuev_sued, accept_retirements=accept_retirements,
                    tuev_sued_run=fresh.run_dir.name if fresh is not None else None)
         guard = any("mass retirement" in c for c in rec.get("failed_checks", []))
-        nxt = ("approve the HubSpot changes in Slack (Approve / Reject in the next message); nothing reaches HubSpot before" if rec["status"] == "PASS" else
+        nxt = ("HubSpot write follows in Slack: auto-approved within the 03 limits, otherwise Approve / Reject in the next message" if rec["status"] == "PASS" else
                "mass-retirement guard tripped: a human decides; to accept, move the month folder to 9_archive/ and run "
                "build --accept-retirements" if guard else "a hard master check failed: see master_summary.md")
         s = _set(ctx, month, phase="built" if rec["status"] == "PASS" else "build_failed", next_action=nxt, build=rec)
