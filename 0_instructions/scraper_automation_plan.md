@@ -10,7 +10,7 @@
 
 Run the whole pipeline once a month on the 1st: scrapers → aggregator → HubSpot prep → HubSpot import → Vercel refresh → changelog in Slack. Hands-off on the 1st except the TÜV SÜD browser step (~15 min), which moves to the last working day of the previous month.
 
-**Rules carried over:** free (existing tools only), completeness beats elegance, no silent failure, nothing deleted (in Drive or HubSpot), no bypass of access blocks, no personal data in Slack or git.
+**Rules carried over:** free (existing tools only), completeness beats elegance, no silent failure, nothing deleted (in Drive or HubSpot), no bypass of access blocks, no personal data in git.
 
 ---
 
@@ -60,7 +60,7 @@ Last working day  n8n → Slack: "TÜV SÜD due" + generated snippet
 | **F. Vercel** | After the import is DONE, n8n calls the project's Deploy Hook; the app rebuilds and pulls fresh data. | Deploy succeeds. | Alert; HubSpot data is already correct. |
 | **G. Changelog** | One Slack message: status per ÜO, totals, new / retired / reactivated / changed per ÜO and Bundesland, retirements highlighted for M&A (succession signals), links to filtered HubSpot views and the run folder. Optional short Claude summary on top; the deterministic numbers stay the source of truth. | — | — |
 
-**Personal data:** Slack references rows only as `master_id` + ÜO + city (site names often contain owner names). Details stay in HubSpot and Drive.
+**Personal data in Slack:** allowed since 2026-11-02 (Nikos; the earlier "only `master_id` + ÜO + city" rule is removed). The channel is private; the 03 approval post attaches the changelog with site names. Personal data stays out of git.
 
 **Known HubSpot limit (unchanged):** a reactivated site gets `compscraper_business_status = aktiv`, but its old `compscraper_closedondate` is not cleared by an import (empty cells never overwrite). The changelog lists reactivations; clear by hand, or later by a single API update.
 
