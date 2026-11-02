@@ -70,21 +70,22 @@ def test_gtup_code_matches_text(df):
 
 
 @pytest.mark.parametrize(
-    "herkunft, has_code, has_text, expected",
+    "herkunft, has_code, has_text, expected, review",
     [
-        ("E", True, True, "pruefstelle"),
-        ("G", False, False, "partner_office"),
-        ("G", True, True, "unknown"),  # Herkunft disagrees with vor Ort
-        ("E", False, False, "unknown"),
-        ("E", True, False, "unknown"),  # code and text disagree
-        ("E", False, True, "unknown"),
-        (None, True, True, "unknown"),  # Herkunft missing
+        ("E", True, True, "pruefstelle", False),
+        ("G", False, False, "partner_office", False),
+        ("G", True, True, "pruefstelle", True),  # the vor-Ort label decides; Herkunft disagreeing only flags it
+        ("E", False, False, "partner_office", True),
+        ("E", True, False, "unknown", True),  # code and text disagree
+        ("E", False, True, "unknown", True),
+        (None, True, True, "pruefstelle", True),  # Herkunft missing
+        (None, False, False, "partner_office", True),
     ],
 )
-def test_classify_site_type(herkunft, has_code, has_text, expected):
+def test_classify_site_type(herkunft, has_code, has_text, expected, review):
     site_type, _, needs_review = classify_site_type(herkunft, has_code, has_text)
     assert site_type == expected
-    assert needs_review == (expected == "unknown")
+    assert needs_review == review
 
 
 def test_id_prefix_check(df):

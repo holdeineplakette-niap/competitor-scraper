@@ -231,6 +231,10 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
                               "action": "candidate", "rule": "candidate_rejected", "field": "", "chosen_source": "",
                               "chosen_value": "", "dropped": "", "note": f"{p['km'] * 1000:.0f} m apart, different street or house number"})
 
+    # an AD-Büro within AD_BUERO_STATION_KM of a non-AD row is an office at a station (often its own operator's): flag only
+    for gid in _ad_buero_at_station(groups):
+        cand_reasons[gid].append("ad_buero_at_station")
+
     # ---- finish rows, ids, first/last seen
     for g in groups:
         is_hdp = bool(hdp_file_ids) and any(r["location_id"] in hdp_file_ids for r in g.recs)
@@ -356,6 +360,22 @@ def _build_groups(recs, overrides, across, extra_same, cent, states, known, gc):
 
 
 # ---- validation ---------------------------------------------------------------------------------------------------
+def _ad_buero_at_station(groups) -> list[int]:
+    """gids of AD-Büro rows with a non-AD row (a station) within ms.AD_BUERO_STATION_KM; rows without coordinates never match."""
+    def pts(want: str):
+        return [(g.gid, float(g.row["lat"]), float(g.row["lng"])) for g in groups if g.row["ad_buero"] == want and g.row["lat"] and g.row["lng"]]
+    grid: dict[tuple[int, int], list[tuple[float, float]]] = defaultdict(list)
+    for _, la, ln in pts(""):
+        grid[(int(la * 100), int(ln * 100))].append((la, ln))  # ~1 km cells, far wider than the radius
+    hits = []
+    for gid, la, ln in pts("Yes"):
+        ci, cj = int(la * 100), int(ln * 100)
+        near = [p for di in (-1, 0, 1) for dj in (-1, 0, 1) for p in grid.get((ci + di, cj + dj), [])]
+        if near and float(min(geo.haversine_km(la, ln, p[0], p[1]) for p in near)) <= ms.AD_BUERO_STATION_KM:
+            hits.append(gid)
+    return hits
+
+
 MAX_INPUT_AGE_DAYS = 45  # an input run older than this is a stale source
 TIGHT_TOLERANCE = 0.05  # sources whose scraper writes no run_summary (no own count to compare with)
 VOLUME_TOLERANCE = 0.15  # first master only: rows per source vs the count in scraper_status.md
@@ -416,6 +436,8 @@ def _validate(recs, groups, dd, master, infos, selected, excluded, prev, gc, inc
     checks.append(_check("every row has a valid site_type", bad_st.empty, f"{len(bad_st)} rows"))
     bad_psp = master[~master["psp"].isin(ms.PSP_VALUES)]
     checks.append(_check("every row has psp Yes or No", bad_psp.empty, f"{len(bad_psp)} rows"))
+    bad_ad = master[~master["ad_buero"].isin(ms.AD_BUERO_VALUES)]
+    checks.append(_check("every row has ad_buero Yes or empty", bad_ad.empty, f"{len(bad_ad)} rows"))
     clashes = [o for o in overrides if o["decision"] == "different" and o["location_id_a"] in (row_master or {}) and o["location_id_b"] in (row_master or {})
                and row_master[o["location_id_a"]] == row_master[o["location_id_b"]]]
     unused = dd.info["overrides_unused"]
@@ -521,6 +543,7 @@ def _summary(mode, started_at, month, selected, infos, recs, groups, dd, master,
         "master_by_uo": _counts(master["uo"]),
         "master_by_site_type": _counts(master["site_type"]),
         "master_by_psp": _counts(master["psp"]),
+        "master_by_ad_buero": _counts(master["ad_buero"].replace("", "(empty)")),
         "master_by_state": _counts(master["state"].replace("", "(none)")),
         "needs_review_rows": len(review),
         "needs_review_by_reason": by_reason,

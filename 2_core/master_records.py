@@ -168,6 +168,7 @@ def load_source(cand: mi.Candidate, include_out_of_scope: bool, plz_known: set[s
             og = ms.OPERATOR_GROUP_CONSTANT[slug]
         rec["operator_group"] = og or ""
         rec["psp"] = ms.psp_value(slug, get(src, "psp"))
+        rec["ad_buero"] = ms.ad_buero_value(slug, src_type)
         country = src.get(tgt.get("~country", ""), "") if "~country" in tgt else ""
         if country.strip().upper() not in ("", "D", "DE"):
             flags.append(f"country_not_de:{country.strip()}")

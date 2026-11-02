@@ -156,6 +156,11 @@ def resolve_group(gid: int, recs: list[dict], agg_flags: list[str], cent: dict, 
     row["psp"] = "Yes" if all(r["psp"] == "Yes" for r in ordered) else "No"
     if len({r["psp"] for r in ordered}) > 1:
         _log(g, "psp", "", row["psp"], [f"{r['slug']}={r['psp']}" for r in ordered], "merged records disagree: No wins")
+    # ad_buero: Yes only if every merged record is an AD-Büro; a Prüfstelle in the group makes the merged site one
+    row["ad_buero"] = "Yes" if all(r["ad_buero"] == "Yes" for r in ordered) else ""
+    if len({r["ad_buero"] for r in ordered}) > 1:
+        _log(g, "ad_buero", "", row["ad_buero"], [f"{r['slug']}={r['ad_buero'] or 'Prüfstelle'}" for r in ordered],
+             "merged records disagree: Prüfstelle wins")
     row["listed_by"] = "|".join(sorted(g.slugs))
     row["source_ids"] = "|".join(r["location_id"] for s in sorted(g.slugs) for r in ordered if r["slug"] == s)
 

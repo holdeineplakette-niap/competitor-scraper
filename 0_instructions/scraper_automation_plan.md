@@ -62,7 +62,7 @@ Last working day  n8n → Slack: "TÜV SÜD due" + generated snippet
 
 **Personal data:** Slack references rows only as `master_id` + ÜO + city (site names often contain owner names). Details stay in HubSpot and Drive.
 
-**Known HubSpot limit (unchanged):** a reactivated site gets `business_status = aktiv`, but its old `compscraper_closedondate` is not cleared by an import (empty cells never overwrite). The changelog lists reactivations; clear by hand, or later by a single API update.
+**Known HubSpot limit (unchanged):** a reactivated site gets `compscraper_business_status = aktiv`, but its old `compscraper_closedondate` is not cleared by an import (empty cells never overwrite). The changelog lists reactivations; clear by hand, or later by a single API update.
 
 ---
 
@@ -140,7 +140,7 @@ Compare last month's master with the new one **locally in GitHub Actions** with 
 - The baseline is the previous month's master, so the master import (workstreams 1–3) has to exist first.
 - New companies still need the match check from workstreams 1–2 before they are created, so a new site never duplicates an existing company or touches a deal.
 - Open: what happens to **changed** fields of existing companies now that only NEW and RETIRED are uploaded (dropped, or a rare separate step), and reactivations.
-- Retired sites: `business_status = scraper-geschlossen` plus `compscraper_closedondate`, as before; never deleted.
+- Retired sites: `compscraper_business_status = scraper-geschlossen` plus `compscraper_closedondate`, as before; never deleted.
 
 ### Superseded by this section
 

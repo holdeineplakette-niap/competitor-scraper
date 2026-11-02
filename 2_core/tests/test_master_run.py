@@ -511,6 +511,29 @@ def test_psp_is_yes_for_kues_psp_rows_and_no_for_every_other_source(tmp_path):
     assert not any("psp" in w for w in res.summary["warnings"])  # a known column: no "new column" warning
 
 
+def test_ad_buero_is_yes_for_gtue_and_kues_partner_offices_only(tmp_path):
+    g_ad = source_row("gtue", "GTUE-A", street="Gewerbering 2", zip="80331", city="München", lat="48.137", lng="11.575", site_type="partner_office")
+    g_st = source_row("gtue", "GTUE-S", street="Ring 7", zip="20095", city="Hamburg", lat="53.55", lng="10.0")
+    k_ad = source_row("kues", "KUES-A", street="Lahnstr. 1", zip="35037", city="Marburg", lat="50.79", lng="8.75", site_type="partner_office", psp="Yes")
+    p = source_row("tuev_hessen", "TUEV_HESSEN-P", street="Lahnstr. 99", zip="35037", city="Marburg", lat="50.81", lng="8.77", site_type="partner")
+    world(tmp_path, gtue=[g_ad, g_st], kues=[k_ad], tuev_hessen=[p])
+    res = go(tmp_path)
+    ad = dict(zip(res.master["source_ids"], res.master["ad_buero"]))
+    assert {k: ad[k] for k in ("GTUE-A", "GTUE-S", "KUES-A", "TUEV_HESSEN-P")} == {"GTUE-A": "Yes", "GTUE-S": "", "KUES-A": "Yes", "TUEV_HESSEN-P": ""}
+    assert set(res.master["ad_buero"]) == {"Yes", ""}  # never "No": a Prüfstelle has no value
+    assert res.summary["master_by_ad_buero"]["Yes"] == 2
+
+
+def test_ad_buero_next_to_a_station_is_flagged_not_changed(tmp_path):
+    g_ad = source_row("gtue", "GTUE-A", street="Gewerbering 2", zip="80331", city="München", lat="48.1370", lng="11.5750", site_type="partner_office")
+    g_st = source_row("gtue", "GTUE-S", street="Gewerbering 4", zip="80331", city="München", lat="48.1374", lng="11.5752")  # ~50 m
+    world(tmp_path, gtue=[g_ad, g_st])
+    res = go(tmp_path)
+    row = res.master[res.master["source_ids"] == "GTUE-A"].iloc[0]
+    assert row["ad_buero"] == "Yes" and "ad_buero_at_station" in row["doubt_flags"].split("; ")
+    assert "ad_buero_at_station" not in res.master[res.master["source_ids"] == "GTUE-S"].iloc[0]["doubt_flags"]
+
+
 def test_an_unknown_psp_value_is_a_hard_error(tmp_path):
     world(tmp_path, kues=[source_row("kues", "KUES-1", street="A 1", zip="80331", city="München", psp="maybe")])
     res = go(tmp_path)

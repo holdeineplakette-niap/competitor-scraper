@@ -14,7 +14,7 @@ STATES = dict(zip(CENTROIDS["zip"], CENTROIDS["state"]))
 def rec(slug, lid, **kw):
     r = {"slug": slug, "family": ms.family_of(slug), "rank": ms.rank(slug), "location_id": lid, "name": "", "street": "", "zip": "",
          "city": "", "lat": None, "lng": None, "phone": "", "email": "", "website": "", "booking_url": "", "profile_url": "",
-         "opening_hours": "", "services": "", "operator_name": "", "operator_group": "", "psp": "No", "uo": "TÜV SÜD", "site_type": "unknown",
+         "opening_hours": "", "services": "", "operator_name": "", "operator_group": "", "psp": "No", "ad_buero": "", "uo": "TÜV SÜD", "site_type": "unknown",
          "site_type_evidence": f"{slug}:x", "in_scope": True, "scope_reason": "", "scraped_at": "2026-10-06T10:00:00", "flags": [],
          "coord_hint": "", "sign": "", "veto": ""}
     r.update(kw)
@@ -121,7 +121,7 @@ def test_old_review_reasons_are_doubt_flags_and_needs_review_is_only_for_status_
     assert g.row["doubt_flags"].split("; ") == ["dekra:psp_suspect", "dekra:thin", "uo_assumed:x", "shared_address_other_uo:kues"]
     assert g.row["status"] == "active" and g.row["retired_on"] == ""
     assert set(ms.DOUBT_REASONS) == {"match_candidate_unresolved", "coords_unresolved", "address_incomplete", "plz_invalid",
-                                     "hdp_match_unresolved", "hdp_own_site_kept"}
+                                     "hdp_match_unresolved", "hdp_own_site_kept", "ad_buero_at_station"}
     assert set(ms.REVIEW_REASONS) == {"retired", "reactivated"}
     street_less = resolve(rec("kues", "K2", street="", zip="80331", city="München", uo="KÜS"))  # a former review reason: still not needs_review
     assert street_less.row["needs_review"] == "False" and "address_incomplete" in doubts(street_less)
@@ -154,6 +154,17 @@ def test_psp_is_yes_only_if_every_merged_record_says_yes():
     assert mixed.row["psp"] == "No" and any(l["field"] == "psp" for l in mixed.logs)  # an on-site record wins, and it is logged
     other = rec("tuev_sued", "S1", street="A-Str. 1", zip="35037", city="Marburg")
     assert resolve(other).row["psp"] == "No"
+
+
+def test_ad_buero_is_yes_only_if_every_merged_record_is_one():
+    ad = rec("gtue", "G1", street="A-Str. 1", zip="35037", city="Marburg", ad_buero="Yes", uo="GTÜ")
+    ad2 = rec("kues", "K1", street="A-Str. 1", zip="35037", city="Marburg", ad_buero="Yes", uo="KÜS")
+    station = rec("gtue", "G2", street="A-Str. 1", zip="35037", city="Marburg", uo="GTÜ")
+    assert resolve(ad).row["ad_buero"] == "Yes"
+    assert resolve(ad, ad2).row["ad_buero"] == "Yes"
+    assert resolve(station).row["ad_buero"] == ""
+    mixed = resolve(ad, station)
+    assert mixed.row["ad_buero"] == "" and any(l["field"] == "ad_buero" for l in mixed.logs)  # a Prüfstelle wins, and it is logged
 
 
 def test_conflicting_uo_values_are_flagged():

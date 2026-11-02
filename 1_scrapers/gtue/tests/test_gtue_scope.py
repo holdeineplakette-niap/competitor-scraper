@@ -40,6 +40,13 @@ def test_classify_scope(site_type, offers_hu, tier, in_scope, reason):
     assert classify_scope(site_type, offers_hu) == (tier, in_scope, reason)
 
 
+@pytest.mark.parametrize("site_type", ["pruefstelle", "partner_office", "unknown"])
+@pytest.mark.parametrize("offers_hu", [True, False])
+def test_conflict_stays_in_scope(site_type, offers_hu):
+    # Herkunft disagreeing with the vor-Ort label is no certain cause: in scope as unknown_conflict, even without HU
+    assert classify_scope(site_type, offers_hu, conflict=True) == (TIER_UNKNOWN, True, None)
+
+
 def test_only_the_no_hu_tier_is_out_of_scope():
     assert set(gtue.SCOPE_TIERS) - set(IN_SCOPE_TIERS) == {TIER_OFFICE_NO_HU}
 

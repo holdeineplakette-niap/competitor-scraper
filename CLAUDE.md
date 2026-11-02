@@ -15,6 +15,7 @@ A Python pipeline that scrapes every HU inspection location (Prüfstelle) in Ger
 - **Never write "Liria"**: it is HDP. Exception: the endpoint host `liria-ai-inspect-backend` in `1_scrapers/hdp/src/fetch.py`.
 - **Aggregator changes are Nikos's to ask for.** Don't loosen guards (can_join, forced review, input checks, HDP match rules) and never run `core.master_run official` unless asked.
 - **HubSpot:** never import `hubspot_import_2026-10.csv` as is; M&A Deals are never deleted or overwritten; reading HubSpot data needs Nikos's go.
+- **`stutzpunkt_pruforganisation` is the operating ÜO, not a Prüfstützpunkt flag.** Only the internal name is misleading; the label is "Prüforganisation" and every site has a value. Whether a site is a Prüfstützpunkt is `stutzpunkt` (Ja / Nein).
 - Raw data (`raw.jsonl`) is never edited. Nothing is deleted: leftovers go to `9_archive/`.
 - Personal data (operator names, emails, phone numbers) is in raw responses, exports and the München test fixture: keep those out of git. Showing them in chat is fine when Nikos asks (2026-10-26).
 

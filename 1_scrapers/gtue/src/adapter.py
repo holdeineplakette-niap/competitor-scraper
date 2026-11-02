@@ -183,7 +183,10 @@ def classify_site_type(herkunft: str | None, has_code: bool, has_text: bool) -> 
     """Return (site_type, site_type_evidence, needs_review).
 
     has_code: branch code GTUP present; has_text: "Fahrzeugprüfung vor Ort" text present.
-    All three signals must agree; any disagreement or missing value -> "unknown".
+    Decision (Nikos, 2026-11-02): GTÜ's own vor-Ort label decides (code and text, which agree on every record seen):
+    with it a Prüfstelle, without it an AD-Büro (partner_office: an office whose engineers inspect at PSPs).
+    Herkunft (E / G) is only a cross-check: when it disagrees the type stands and needs_review is set.
+    Code and text disagreeing, or Herkunft missing -> needs_review; code and text disagreeing -> "unknown".
     """
     evidence = (
         f"herkunft:{herkunft or 'missing'}; "
@@ -192,18 +195,19 @@ def classify_site_type(herkunft: str | None, has_code: bool, has_text: bool) -> 
     )
     if has_code != has_text:
         return "unknown", evidence, True
-    if has_code and herkunft == "E":
-        return "pruefstelle", evidence, False
-    if not has_code and herkunft == "G":
-        return "partner_office", evidence, False
-    return "unknown", evidence, True
+    if has_code:
+        return "pruefstelle", evidence, herkunft != "E"
+    return "partner_office", evidence, herkunft != "G"
 
 
-def classify_scope(site_type: str, offers_hu: bool) -> tuple[str, bool, str | None]:
+def classify_scope(site_type: str, offers_hu: bool, conflict: bool = False) -> tuple[str, bool, str | None]:
     """Return (scope_tier, in_scope before the country check, reason if out of scope).
 
-    Only a certain cause excludes a row: a G office whose service list has no HU at all.
+    Only a certain cause excludes a row: a G office whose service list has no HU at all. A row whose signals
+    conflict (needs_review) stays in scope as unknown_conflict, whatever its type: a conflict is no certain cause.
     """
+    if conflict:
+        return TIER_UNKNOWN, True, None
     if site_type == "pruefstelle":
         return TIER_PRUEFSTELLE, True, None
     if site_type == "partner_office":
@@ -237,7 +241,7 @@ def parse_item(item: dict, scraped_at: str) -> dict:
 
     site_type, evidence, needs_review = classify_site_type(herkunft, has_code, has_text)
     offers_hu = HU_HEADLINE in headlines
-    scope_tier, tier_in_scope, scope_reason = classify_scope(site_type, offers_hu)
+    scope_tier, tier_in_scope, scope_reason = classify_scope(site_type, offers_hu, needs_review)
 
     country = _clean(address.get("Country"))
     in_germany = country == HOME_COUNTRY

@@ -17,7 +17,7 @@ MERGE_ACROSS_UO = False  # False: no automatic merge across merge families; shar
 # ---- columns -------------------------------------------------------------------------------------------------
 MASTER_COLUMNS = [
     "master_id", "uo", "listed_by", "source_ids",
-    "site_type", "site_type_evidence", "operator_name", "operator_group", "psp",
+    "site_type", "site_type_evidence", "operator_name", "operator_group", "psp", "ad_buero",
     "name", "street", "zip", "city", "state", "country",
     "lat", "lng", "coord_source", "plz_distance_km",
     "phone", "email", "website", "booking_url", "profile_url",
@@ -31,7 +31,7 @@ CONTACT_FIELDS = ("phone", "email", "website", "booking_url")
 # Everything that used to set it is a doubt flag now: the same tokens, listed in `doubt_flags` and in the review files.
 REVIEW_REASONS = ("retired", "reactivated")  # closed list
 DOUBT_REASONS = ("match_candidate_unresolved", "coords_unresolved", "address_incomplete", "plz_invalid",
-                 "hdp_match_unresolved", "hdp_own_site_kept")  # closed list, tokens in doubt_flags
+                 "hdp_match_unresolved", "hdp_own_site_kept", "ad_buero_at_station")  # closed list, tokens in doubt_flags
 STATUS_VALUES = ("active", "retired")
 LIFECYCLE_FLAGS = ("not_refreshed", "possibly_rekeyed")  # doubt-flag prefixes added after the merge (info, never needs_review)
 
@@ -128,6 +128,20 @@ def psp_value(slug: str, value: str) -> str:
     if value == "Yes":
         return "Yes"
     raise ValueError(f"{slug}: psp value {value!r} is not Yes, No or empty; add it on purpose")
+
+
+# ---- ad_buero ----------------------------------------------------------------------------------------------------
+# Decision (Nikos, 2026-11-02): an AD-Büro is an office without its own inspection lane whose licensed engineers drive
+# to the customers (inspect at Prüfstützpunkte). "Yes" or empty, never "No": a Prüfstelle needs no value. Only the sources
+# that say so: GTÜ without the vor-Ort label (GTUP) and KÜS pruefungvorortmoeglich = 0, both site_type partner_office.
+AD_BUERO_VALUES = ("Yes", "")
+AD_BUERO_SITE_TYPES = {"gtue": ("partner_office",), "kues": ("partner_office",)}  # slug -> source site_type values
+AD_BUERO_STATION_KM = 0.1  # an AD-Büro this close to a non-AD row is flagged ad_buero_at_station (an office at a station)
+
+
+def ad_buero_value(slug: str, site_type: str) -> str:
+    """The master ad_buero of one source row: "Yes" for an AD-Büro, else empty."""
+    return "Yes" if site_type in AD_BUERO_SITE_TYPES.get(slug, ()) else ""
 
 
 # ---- PLZ corrections (explicit and logged; never a regex repair) ------------------------------------------------
