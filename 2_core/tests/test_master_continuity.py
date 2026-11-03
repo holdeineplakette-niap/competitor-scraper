@@ -1,4 +1,4 @@
-"""master_continuity: a site that is still there keeps its master_id (CHANGED), only a site gone twice is RETIRED.
+"""master_continuity: a site that is still there keeps its master_id (CHANGED), only a site that is gone is RETIRED.
 
 The cases are synthetic look-alikes of the November 2026 review (no real operator names, e-mails or phones in git):
 re-keyed at one address (also with a changed PLZ), moved within the town (shared rare domain / same name), a new listing at
@@ -113,4 +113,4 @@ def test_a_rekeyed_site_and_a_second_listing_are_changed_not_retired_and_new(tmp
     write_source(tmp_path, "gtue", base + [rekeyed, second], run="2026-12-02_1000_full")
     m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True)
     assert dict(zip(m3.master["source_ids"], m3.master["master_id"]))["G-0|G-SECOND"] == g0_id  # stays joined
-    assert ms.RETIRE_AFTER_MISSED_RUNS == 2
+    assert ms.retire_after() == 1  # the two-run safety is off by default

@@ -2,9 +2,9 @@
 
 Every master_id ever issued stays in the master. A row of the previous official master that gets no group this month
 (master_continuity has already given its id to a re-keyed or moved site where there is one):
-  * when every source behind it has a fresh input run, its `missed_runs` goes up by one; it is RETIRED only when that reaches
-    ms.RETIRE_AFTER_MISSED_RUNS (2: two fresh runs in a row without it, Nikos 2026-11-03). Until then it stays active with its
-    last values, so a one-off gap in a finder never reaches HubSpot;
+  * when every source behind it has a fresh input run, its `missed_runs` goes up by one; it is RETIRED when that reaches
+    ms.retire_after(): 1 by default (retired at the first fresh run without it), 2 with ms.TWO_RUN_RETIREMENT on (two fresh
+    runs in a row; until then it stays active with its last values, so a one-off gap in a finder never reaches HubSpot);
   * otherwise stays active, unchanged, flagged `not_refreshed:<sources>`, `missed_runs` unchanged (a stale or rejected input
     is no evidence, so it neither counts nor resets);
   * when master_ids merged it into another row (its source rows now belong to that row) it is retired at once and flagged
@@ -133,12 +133,12 @@ def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: di
             continue
         missed += 1
         row["missed_runs"] = str(missed)
-        if missed < ms.RETIRE_AFTER_MISSED_RUNS:  # not found in a fresh run, but not yet often enough: stays active
+        if missed < ms.retire_after():  # not found in a fresh run, but not yet often enough (two-run safety on): stays active
             carried.append(row)
             missing.append({"master_id": mid, "missed_runs": missed, "last_seen": row["last_seen"]})
             events.append({"master_id": mid, "location_ids": row["source_ids"], "action": "lifecycle", "rule": "missing", "field": "",
                            "chosen_source": "", "chosen_value": str(missed), "dropped": "",
-                           "note": f"not found in a fresh run ({missed} of {ms.RETIRE_AFTER_MISSED_RUNS}): kept active"})
+                           "note": f"not found in a fresh run ({missed} of {ms.retire_after()}): kept active"})
             continue
         row.update(status="retired", retired_on=run_date, needs_review="True", needs_review_reason="retired")
         dup = active_by_addr.get((row["uo"], _addr(row))) if _addr(row) else None
@@ -151,7 +151,7 @@ def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: di
             by_source[s] = by_source.get(s, 0) + 1
         events.append({"master_id": mid, "location_ids": row["source_ids"], "action": "lifecycle", "rule": "duplicate_closed" if dup else "retired",
                        "field": "", "chosen_source": "", "chosen_value": dup or run_date, "dropped": "",
-                       "note": f"not found in {missed} fresh runs in a row" + (f"; same address as {dup}: closed as its duplicate" if dup else "")})
+                       "note": f"not found in {missed} fresh run{'s in a row' if missed > 1 else ''}" + (f"; same address as {dup}: closed as its duplicate" if dup else "")})
 
     # re-keying: a site retired now and a brand-new id at the same address. Both are flagged, nothing is merged.
     prev_ids = set(prev["master_id"])

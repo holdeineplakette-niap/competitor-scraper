@@ -34,7 +34,16 @@ DOUBT_REASONS = ("match_candidate_unresolved", "coords_unresolved", "address_inc
                  "hdp_match_unresolved", "hdp_own_site_kept", "ad_buero_at_station")  # closed list, tokens in doubt_flags
 STATUS_VALUES = ("active", "retired")
 LIFECYCLE_FLAGS = ("not_refreshed", "possibly_rekeyed", "duplicate_of")  # doubt-flag prefixes added after the merge (info, never needs_review)
-RETIRE_AFTER_MISSED_RUNS = 2  # a site is retired only when this many fresh runs in a row did not find it (Nikos, 2026-11-03)
+# Two-run safety (built 2026-11-03, switched off the same day, Nikos: fast and responsive): True = a site is retired only when
+# RETIRE_AFTER_MISSED_RUNS fresh runs in a row did not find it; False = at the first fresh run without it. `missed_runs` is kept
+# either way, so switching it on needs no migration.
+TWO_RUN_RETIREMENT = False
+RETIRE_AFTER_MISSED_RUNS = 2
+
+
+def retire_after() -> int:
+    """Fresh runs in a row without a site before it is retired."""
+    return RETIRE_AFTER_MISSED_RUNS if TWO_RUN_RETIREMENT else 1
 
 # ---- families and fixed source order --------------------------------------------------------------------------
 FAMILIES = {"tuev_sued": "sued_hessen", "tuev_hessen": "sued_hessen", "tuev_rheinland": "rheinland_fsp", "fsp": "rheinland_fsp"}

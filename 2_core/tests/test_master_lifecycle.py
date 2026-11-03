@@ -16,6 +16,11 @@ from test_master_run import T1, T2, go, rows, world
 FRESH = {"gtue": True, "kues": True, "dekra": True}
 
 
+@pytest.fixture
+def two_runs(monkeypatch):
+    monkeypatch.setattr(ms, "TWO_RUN_RETIREMENT", True)  # the two-run safety switched on (off by default, Nikos 2026-11-03)
+
+
 def mrow(mid, **kw) -> dict:
     base = {c: "" for c in ms.MASTER_COLUMNS}
     base.update(master_id=mid, uo="GTÜ", listed_by="gtue", source_ids=f"GTUE-{mid}", name=f"Name {mid}", street=f"Weg {mid[-1]}", zip="01067",
@@ -34,7 +39,21 @@ def by_id(df) -> dict:
 
 
 # ---- master_lifecycle.apply ------------------------------------------------------------------------------------------------------
-def test_a_row_missed_by_one_fresh_run_stays_active_and_the_second_miss_retires_it_with_its_last_values():
+def test_by_default_a_row_that_no_group_claims_is_retired_at_the_first_fresh_miss_with_its_last_values():
+    prev = frame(mrow("PS-000001"), mrow("PS-000002"))
+    cur = frame(mrow("PS-000001"))
+    life = ml.apply(cur, prev, "2026-11-03", FRESH)
+    r = by_id(life.master)
+    assert set(r) == {"PS-000001", "PS-000002"}  # nothing is dropped
+    gone = r["PS-000002"]
+    assert (gone["status"], gone["retired_on"], gone["needs_review"], gone["needs_review_reason"]) == ("retired", "2026-11-03", "True", "retired")
+    assert gone["name"] == "Name PS-000002" and gone["phone"] == "0351 1" and gone["last_seen"] == "2026-10-06"  # last known values
+    assert r["PS-000001"]["status"] == "active" and r["PS-000001"]["needs_review"] == "False"
+    assert life.info["retired"] == ["PS-000002"] and life.info["retired_by_source"] == {"gtue": 1}
+    assert by_id(life.master)["PS-000002"]["missed_runs"] == "1" and ms.TWO_RUN_RETIREMENT is False
+
+
+def test_a_row_missed_by_one_fresh_run_stays_active_and_the_second_miss_retires_it_with_its_last_values(two_runs):
     prev = frame(mrow("PS-000001"), mrow("PS-000002"))
     cur = frame(mrow("PS-000001"))
     first = ml.apply(cur, prev, "2026-11-03", FRESH)
@@ -139,7 +158,29 @@ def old_inputs_are_fresh(monkeypatch):
     monkeypatch.setattr(master_run, "MAX_INPUT_AGE_DAYS", 1000)  # the synthetic sources stay from October
 
 
-def test_retire_after_two_fresh_misses_and_reactivate_keep_the_id_and_flag_one_run_only(tmp_path, old_inputs_are_fresh):
+def test_retire_and_reactivate_across_three_months_keep_the_id_and_flag_one_run_only(tmp_path, old_inputs_are_fresh):
+    world(tmp_path, gtue=rows("G", 3))
+    m1 = go(tmp_path, "official", confirm=True)
+    assert m1.status == "PASS" and (m1.master["needs_review"] == "False").all() and set(m1.master["status"]) == {"active"}
+    vanished = next(i for s, i in zip(m1.master["source_ids"], m1.master["master_id"]) if s == "G-2")
+    write_source(tmp_path, "gtue", rows("G", 2), run="2026-11-02_1000_full")
+    m2 = go(tmp_path, "official", at=T2, confirm=True, accept_retirements=True)
+    row = m2.master.set_index("master_id").loc[vanished]
+    assert m2.status == "PASS" and (row["status"], row["retired_on"], row["needs_review_reason"]) == ("retired", "2026-11-03", "retired")
+    assert (m2.master["needs_review"] == "True").sum() == 1 and m2.summary["lifecycle"]["retired"] == [vanished]
+    assert (m2.diff["change"] == "retired").sum() == 1 and "disappeared" not in set(m2.diff["change"])
+    write_source(tmp_path, "gtue", rows("G", 3), run="2026-12-02_1000_full")  # it is listed again
+    m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True)
+    back = m3.master.set_index("master_id").loc[vanished]
+    assert (back["status"], back["retired_on"], back["needs_review_reason"]) == ("active", "", "reactivated")
+    assert back["first_seen"] == "2026-10-06" and set(m3.master["master_id"]) == set(m1.master["master_id"])
+    assert (m3.diff["change"] == "reactivated").sum() == 1
+    write_source(tmp_path, "gtue", rows("G", 3), run="2027-01-02_1000_full")
+    m4 = go(tmp_path, "official", at=datetime(2027, 1, 3, 9, 0), confirm=True)
+    assert (m4.master["needs_review"] == "False").all() and set(m4.master["status"]) == {"active"}
+
+
+def test_retire_after_two_fresh_misses_and_reactivate_keep_the_id_and_flag_one_run_only(tmp_path, old_inputs_are_fresh, two_runs):
     world(tmp_path, gtue=rows("G", 3))
     m1 = go(tmp_path, "official", confirm=True)
     assert m1.status == "PASS" and (m1.master["needs_review"] == "False").all() and set(m1.master["status"]) == {"active"}
@@ -186,7 +227,7 @@ def test_mass_retirement_fails_the_run_unless_it_is_accepted(tmp_path, old_input
     blocked = go(tmp_path, "dev", at=T2)
     assert blocked.status == "FAIL" and any("mass retirement" in c["check"] and not c["ok"] and c["severity"] == "hard" for c in blocked.summary["checks"])
     accepted = go(tmp_path, "dev", at=T2, accept_retirements=True)
-    assert accepted.status == "PASS" and len(accepted.summary["lifecycle"]["missing"]) == 5 and accepted.summary["lifecycle"]["retired"] == []
+    assert accepted.status == "PASS" and len(accepted.summary["lifecycle"]["retired"]) == 5
     assert any("mass retirement" in c["check"] and not c["ok"] and c["severity"] == "review" for c in accepted.summary["checks"])
 
 
@@ -256,7 +297,7 @@ def test_the_monthly_file_has_new_changed_retired_and_reactivated_rows_only():
     assert "PS-000001" not in rows_ and "PS-000005" not in rows_
 
 
-def test_a_run_writes_the_hubspot_files_next_to_the_master(tmp_path, old_inputs_are_fresh):
+def test_a_run_writes_the_hubspot_files_next_to_the_master(tmp_path, old_inputs_are_fresh, two_runs):
     world(tmp_path, gtue=rows("G", 3))
     m1 = go(tmp_path, "official", confirm=True)
     first = m1.out_dir / "hubspot_import_2026-10.csv"

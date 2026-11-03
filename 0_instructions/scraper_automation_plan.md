@@ -60,7 +60,7 @@ Last working day  n8n → Slack: "TÜV SÜD due" + generated snippet
 | **F. Vercel** | After the import is DONE, n8n calls the project's Deploy Hook; the app rebuilds and pulls fresh data. | Deploy succeeds. | Alert; HubSpot data is already correct. |
 | **G. Changelog** | One Slack message: status per ÜO, totals, new / retired / reactivated / changed per ÜO and Bundesland, retirements highlighted for M&A (succession signals), links to filtered HubSpot views and the run folder. Optional short Claude summary on top; the deterministic numbers stay the source of truth. | — | — |
 
-**Classification (2026-11-03):** RETIRED = not found in two fresh runs in a row (`missed_runs`); a re-keyed or moved site keeps its PS-ID and is CHANGED; a new listing at an address its source already has is no NEW; a closed duplicate is CHANGED. Details: `scraper_status.md`, item "Changelog classifier".
+**Classification (2026-11-03):** RETIRED = not found in a fresh run (an optional two-run safety, `master_schema.TWO_RUN_RETIREMENT`, is off by default); a re-keyed or moved site keeps its PS-ID and is CHANGED; a new listing at an address its source already has is no NEW; a closed duplicate is CHANGED. Details: `scraper_status.md`, item "Changelog classifier".
 
 **Personal data in Slack:** allowed since 2026-11-02 (Nikos; the earlier "only `master_id` + ÜO + city" rule is removed). The channel is private; the 03 approval post attaches the changelog with site names. Personal data stays out of git.
 

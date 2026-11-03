@@ -15,7 +15,7 @@ per ÜO stays the rule, decision 2026-11-03):
                rare e-mail / website domain: Abstatt (vogler-ing.de), Mus, DEKRA Neuss
    The new group takes the old master_id, so the export sees CHANGED fields (address, name, ...).
 
-What is left missing goes to master_lifecycle (retired only after RETIRE_AFTER_MISSED_RUNS fresh runs in a row).
+What is left missing goes to master_lifecycle (retired at the first fresh run without it, or at the second with ms.TWO_RUN_RETIREMENT).
 """
 
 from __future__ import annotations
