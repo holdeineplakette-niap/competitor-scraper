@@ -208,6 +208,21 @@ def test_retire_after_two_fresh_misses_and_reactivate_keep_the_id_and_flag_one_r
     assert (m5.master["needs_review"] == "False").all() and set(m5.master["status"]) == {"active"}
 
 
+def test_a_reused_input_run_is_no_second_miss(tmp_path, old_inputs_are_fresh, two_runs):
+    """FSP or TÜV SÜD not uploaded this month: the master reuses last month's run, which is no new evidence."""
+    world(tmp_path, gtue=rows("G", 3))
+    m1 = go(tmp_path, "official", confirm=True)
+    vanished = next(i for s, i in zip(m1.master["source_ids"], m1.master["master_id"]) if s == "G-2")
+    write_source(tmp_path, "gtue", rows("G", 2), run="2026-11-02_1000_full")
+    m2 = go(tmp_path, "official", at=T2, confirm=True, accept_retirements=True)
+    assert m2.master.set_index("master_id").loc[vanished, "missed_runs"] == "1" and m2.summary["input_notes"]["gtue"]["reused"] is False
+    m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True)  # no new gtue run: the November one again
+    row = m3.master.set_index("master_id").loc[vanished]
+    assert m3.status == "PASS" and (row["status"], row["missed_runs"]) == ("active", "1")
+    assert m3.summary["input_notes"]["gtue"]["reused"] is True and m3.summary["lifecycle"]["fresh_sources"]["gtue"] is False
+    assert m3.summary["lifecycle"]["retired"] == []
+
+
 def test_a_stale_input_keeps_the_vanished_rows_active_through_the_run(tmp_path, monkeypatch, old_inputs_are_fresh):
     world(tmp_path, gtue=rows("G", 3))
     go(tmp_path, "official", confirm=True)

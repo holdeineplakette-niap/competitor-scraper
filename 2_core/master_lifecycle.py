@@ -37,8 +37,9 @@ class Lifecycle:
 
 
 def fresh_sources(input_notes: dict, max_age_days: int) -> dict[str, bool]:
-    """A source is fresh when its input run is at most `max_age_days` old and no newer run of it was rejected."""
-    return {s: n["age_days"] <= max_age_days and not n["newer_not_qualifying"] for s, n in input_notes.items()}
+    """A source is fresh when its input run is at most `max_age_days` old, no newer run of it was rejected and its data did not
+    already feed the previous master (a reused run, e.g. FSP or TÜV SÜD not uploaded this month, is no new evidence)."""
+    return {s: n["age_days"] <= max_age_days and not n["newer_not_qualifying"] and not n.get("reused") for s, n in input_notes.items()}
 
 
 def with_lifecycle_columns(prev: pd.DataFrame) -> pd.DataFrame:

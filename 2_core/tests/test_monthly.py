@@ -16,6 +16,7 @@ from test_master_run import geocoder
 
 OCT = datetime(2026, 10, 20, 10, 0)  # last month's runs
 FRESH_SUED = datetime(2026, 10, 30, 9, 0)  # on the reminder day of the November cycle
+FRESH_FSP = datetime(2026, 10, 30, 9, 30)  # the FSP browser upload of the same day
 NOV1 = datetime(2026, 11, 1, 2, 0)
 
 ROWS = {
@@ -94,10 +95,13 @@ class Clock:
         return self.t
 
 
-def seed(root, fresh_sued=False):
-    """Last month's passing run of every source (and a TÜV SÜD run of this cycle if asked)."""
+def seed(root, fresh_sued=False, fresh_fsp=True):
+    """Last month's passing run of every source, the FSP browser upload of this cycle (the normal month; fresh_fsp=False: not
+    uploaded) and a TÜV SÜD run of this cycle if asked."""
     for slug in mi.SOURCE_ORDER:
         write_run(root, slug, OCT)
+    if fresh_fsp:
+        write_run(root, "fsp", FRESH_FSP)
     if fresh_sued:
         write_run(root, "tuev_sued", FRESH_SUED)
 
@@ -376,6 +380,8 @@ def test_simulated_end_to_end(tmp_path, centroids):
     s = out.status
     assert {k: r["status"] for k, r in s["scrape"]["sources"].items()} == {k: "PASS" for k in monthly.SCRAPE_ORDER}
     assert s["phase"] == "waiting_for_tuev_sued" and out.code == 0
+    assert "fsp" not in s["scrape"]["sources"]  # FSP comes from the browser, not from the scrape
+    assert monthly.fsp_simulated(ctx).status["fsp"]["status"] == "PASS"
     out = monthly.tuev_sued_simulated(ctx)
     s = on_disk(tmp_path)
     assert s["simulated"] and s["tuev_sued"]["status"] == "PASS"
@@ -383,3 +389,117 @@ def test_simulated_end_to_end(tmp_path, centroids):
     assert s["build"]["master_dir"].startswith("3_master_output/_dev/")
     assert not paths.master_output_dir("2026-11", tmp_path).exists()
     assert monthly.build(ctx, confirm=True).message == "already built"
+
+
+# ---- FSP from the browser -----------------------------------------------------------------------------------------
+def fsp_upload(path, **summary):
+    """A download as the FSP snippet writes it, with the pages of the simulated fsp.de (fsp/tests/test_browser.py runs the real
+    snippet in a browser; here only the core.monthly side is tested)."""
+    import gzip
+    import tempfile
+
+    from fsp import browser
+    from fsp import run as fsp_run
+    from fsp.simulate import SimulatedFsp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        res = fsp_run.run("simulated", root=tmp, now=FRESH_FSP, client=SimulatedFsp(), allow_robots_disallowed=True)
+        files = {}
+        for f in sorted((res.run_dir / "raw").rglob("*")):
+            if f.is_file():
+                rel = f.relative_to(res.run_dir).as_posix()
+                files[rel.removesuffix(".gz")] = gzip.open(f, "rt", encoding="utf-8").read() if rel.endswith(".gz") else f.read_text(encoding="utf-8")
+    s = {"snippet_version": browser.SNIPPET_VERSION, "started": FRESH_FSP.isoformat(), "finished": FRESH_FSP.isoformat(),
+         "requests": len(files), "files": len(files), "complete": True, "stopped_reason": None, "user_agent": "test", **summary}
+    lines = [json.dumps({"file": k, "url": "", "text": v}) for k, v in files.items()]
+    path.write_text("\n".join(lines + [json.dumps({"file": browser.SUMMARY_FILE, "response": s})]) + "\n", encoding="utf-8")
+    return path
+
+
+def callback_payload(root, command):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("monthly_callback", paths.code_root() / ".github" / "scripts" / "monthly_callback.py")
+    cb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cb)
+    payload, _ = cb.build({"COMMAND": command, "RUN_MONTH": "2026-11", "DATA_ROOT": str(root), "MONTHLY_CODE": "0", "JOB_STARTED": "0"})
+    return payload
+
+
+def test_fsp_is_not_scraped_on_the_runner():
+    assert "fsp" not in monthly.SCRAPE_ORDER and "fsp" not in monthly.RUNNERS and "fsp" in mi.SOURCE_ORDER
+
+
+def test_the_tuev_sued_plan_also_writes_the_fsp_snippet_and_the_callback_sends_it_once(tmp_path, centroids):
+    seed(tmp_path, fresh_fsp=False)
+    ctx = make_ctx(tmp_path, Fakes(), at=datetime(2026, 10, 30, 8, 0), centroids=centroids)
+    s = monthly.tuev_sued(ctx, "plan", confirm=True).status
+    assert s["fsp"]["status"] == "WAITING_FOR_UPLOAD" and (tmp_path / s["fsp"]["snippet"]).read_text(encoding="utf-8").startswith("// FSP locator")
+    assert "FSP (browser)" in (paths.monthly_dir("2026-11", tmp_path) / paths.MONTHLY_STATUS_MD).read_text(encoding="utf-8")
+    p = callback_payload(tmp_path, "tuev-sued-plan")
+    assert p["snippet_js"] and p["fsp_snippet_js"].startswith("// FSP locator")
+    assert callback_payload(tmp_path, "status")["fsp_snippet_js"] is None  # only with the TÜV SÜD pass 1
+
+
+def test_with_a_fresh_fsp_run_the_plan_writes_no_fsp_snippet(tmp_path, centroids):
+    seed(tmp_path)
+    ctx = make_ctx(tmp_path, Fakes(), at=datetime(2026, 10, 30, 10, 0), centroids=centroids)
+    s = monthly.tuev_sued(ctx, "plan", confirm=True).status
+    assert s["fsp"]["status"] == "PASS" and s["fsp"]["snippet"] is None
+    assert callback_payload(tmp_path, "tuev-sued-plan")["fsp_snippet_js"] is None
+
+
+def test_fsp_check_imports_the_upload_once(tmp_path):
+    seed(tmp_path, fresh_fsp=False)
+    ctx = make_ctx(tmp_path, Fakes(), at=datetime(2026, 10, 30, 10, 0))
+    f = fsp_upload(tmp_path / "fsp_2026-10-30_0930.jsonl")
+    out = monthly.fsp(ctx, "check", confirm=True, file=f)
+    s = on_disk(tmp_path)
+    assert out.code == 0 and s["fsp"]["status"] == "PASS" and s["fsp"]["in_scope"] == 31 and s["needs_human"] == []
+    assert s["fsp"]["run_folder"] == "1_scrapers/fsp/output/2026-10-30_0930_full"
+    assert monthly.fresh_run("fsp", tmp_path, datetime(2026, 10, 30)).run_dir.name == "2026-10-30_0930_full"
+    again = monthly.fsp(ctx, "check", confirm=True, file=f)  # n8n delivers the same file twice: no second run folder
+    assert again.message == "already imported" and again.status["fsp"]["status"] == "PASS"
+    assert len(list(paths.output_dir("fsp", "full", tmp_path).iterdir())) == 2  # October + this upload
+
+
+def test_a_blocked_fsp_upload_needs_a_human_and_writes_no_run(tmp_path):
+    seed(tmp_path, fresh_fsp=False)
+    ctx = make_ctx(tmp_path, Fakes(), at=datetime(2026, 10, 30, 10, 0))
+    f = fsp_upload(tmp_path / "fsp_2026-10-30_0930.jsonl", complete=False,
+                   stopped_reason={"reason": "blocked", "label": "hu page 1", "status": 403})
+    out = monthly.fsp(ctx, "check", confirm=True, file=f)
+    assert out.code == 1 and out.status["fsp"]["status"] == "BLOCKED"
+    assert any(x.startswith("FSP: BLOCKED") for x in out.status["needs_human"])
+    assert len(list(paths.output_dir("fsp", "full", tmp_path).iterdir())) == 1  # October only
+
+
+def test_without_an_fsp_upload_the_master_uses_the_last_fsp_run_and_says_so(tmp_path):
+    seed(tmp_path, fresh_sued=True, fresh_fsp=False)
+    out = monthly.scrape(make_ctx(tmp_path, Fakes()), confirm=True)
+    s = out.status
+    assert s["build"]["status"] == "PASS" and s["build"]["pins"] == {} and out.code == 1
+    assert [x["slug"] for x in s["build"]["not_refreshed"]] == ["fsp"]
+    assert any(x.startswith("FSP: not refreshed, the master used 2026-10-20_1000_full") for x in s["needs_human"])
+
+
+def test_an_fsp_run_older_than_45_days_is_pinned_and_older_than_120_stops(tmp_path):
+    for slug in mi.SOURCE_ORDER:
+        if slug != "fsp":
+            write_run(tmp_path, slug, OCT)
+    write_run(tmp_path, "tuev_sued", FRESH_SUED)
+    write_run(tmp_path, "fsp", datetime(2026, 9, 1, 10, 0))  # 61 days before the build
+    s = monthly.scrape(make_ctx(tmp_path, Fakes()), confirm=True).status
+    assert s["build"]["status"] == "PASS" and s["build"]["pins"] == {"fsp": "2026-09-01_1000_full"}
+    summary = json.loads((tmp_path / s["build"]["master_dir"] / "master_summary.json").read_text(encoding="utf-8"))
+    assert summary["lifecycle"]["fresh_sources"]["fsp"] is False  # pinned: none of its rows retire
+
+    old = tmp_path / "old"
+    for slug in mi.SOURCE_ORDER:
+        if slug != "fsp":
+            write_run(old, slug, OCT)
+    write_run(old, "tuev_sued", FRESH_SUED)
+    write_run(old, "fsp", datetime(2026, 6, 1, 10, 0))  # 152 days at the build (1.11, 02:xx)
+    out = monthly.scrape(make_ctx(old, Fakes()), confirm=True)
+    assert out.code == 2 and out.status["build"]["status"] == "STOPPED"
+    assert "FSP: the last passing run 2026-06-01_1000_full is 152 days old (limit 120)" in out.status["build"]["reason"]

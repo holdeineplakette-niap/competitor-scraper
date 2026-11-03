@@ -2,7 +2,7 @@
 
 Standard library only (runs with the runner's python3, also when setup failed). Everything comes from the environment:
 
-    COMMAND        the dispatched command (tuev-sued-plan, ...)
+    COMMAND        the dispatched command (tuev-sued-plan, fsp-check, ...)
     RUN_MONTH      YYYY-MM or empty (already checked by the workflow)
     RUN_URL        link to this Actions run
     DATA_ROOT      the synced data copy ($PRUEFSTELLEN_DATA_ROOT)
@@ -45,16 +45,27 @@ def pick_status_file(root: Path, run_month: str, started: float) -> tuple[Path |
     return (files[-1], False) if files else (None, False)
 
 
-def read_snippet(root: Path, status: dict) -> str | None:
-    if status.get("phase") not in SNIPPET_PHASES:
-        return None
-    rel = (status.get("tuev_sued") or {}).get("snippet")
+def _read_rel(root: Path, rel: str | None) -> str | None:
     if not rel:
         return None
     path = (root / rel).resolve()
     if not path.is_relative_to(root.resolve()) or not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
+
+
+def read_snippet(root: Path, status: dict) -> str | None:
+    if status.get("phase") not in SNIPPET_PHASES:
+        return None
+    return _read_rel(root, (status.get("tuev_sued") or {}).get("snippet"))
+
+
+def read_fsp_snippet(root: Path, command: str, status: dict) -> str | None:
+    """The FSP snippet goes out once per cycle, with the TÜV SÜD pass 1 (tuev-sued-plan), while FSP waits for its upload."""
+    f = status.get("fsp") or {}
+    if command != "tuev-sued-plan" or f.get("status") != "WAITING_FOR_UPLOAD":
+        return None
+    return _read_rel(root, f.get("snippet"))
 
 
 def build(env: dict) -> tuple[dict, int]:
@@ -86,7 +97,8 @@ def build(env: dict) -> tuple[dict, int]:
         status.setdefault("needs_human", []).append("data push to Google Drive failed: this run's files are not on the Drive")
         status["exit_code"] = final = 2
     snippet = read_snippet(root, status) if not env.get("STOP_REASON") else None
-    payload = {"command": command, "run_url": env.get("RUN_URL", ""), "status": status, "snippet_js": snippet}
+    fsp_snippet = read_fsp_snippet(root, command, status) if not env.get("STOP_REASON") else None
+    payload = {"command": command, "run_url": env.get("RUN_URL", ""), "status": status, "snippet_js": snippet, "fsp_snippet_js": fsp_snippet}
     return payload, final
 
 
@@ -98,7 +110,7 @@ def main() -> int:
             fh.write(f"exit_code={final}\n")
     s = payload["status"]
     print(f"callback: phase {s.get('phase')}, exit {final}, needs_human {len(s.get('needs_human') or [])}, "
-          f"snippet {'yes' if payload['snippet_js'] else 'no'}")
+          f"snippet {'yes' if payload['snippet_js'] else 'no'}, fsp snippet {'yes' if payload['fsp_snippet_js'] else 'no'}")
     return 0
 
 

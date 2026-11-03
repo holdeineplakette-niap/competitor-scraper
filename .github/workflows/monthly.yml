@@ -5,20 +5,20 @@ name: monthly
 
 on:
   repository_dispatch:
-    types: [tuev-sued-plan, tuev-sued-check, scrape, build-without-tuev-sued, status]
+    types: [tuev-sued-plan, tuev-sued-check, fsp-check, scrape, build-without-tuev-sued, status]
   workflow_dispatch:
     inputs:
       command:
         description: core.monthly command
         type: choice
-        options: [status, tuev-sued-plan, tuev-sued-check, scrape, build-without-tuev-sued]
+        options: [status, tuev-sued-plan, tuev-sued-check, fsp-check, scrape, build-without-tuev-sued]
         default: status
       run_month:
         description: "Cycle month YYYY-MM (optional)"
         type: string
         required: false
       file:
-        description: "tuev-sued-check only: 3_master_output/_monthly/<run_month>/tuev_sued_upload/<name>.jsonl"
+        description: "tuev-sued-check / fsp-check only: 3_master_output/_monthly/<run_month>/{tuev_sued,fsp}_upload/<name>.jsonl"
         type: string
         required: false
 
@@ -63,20 +63,21 @@ jobs:
           fi
           error=""
           case "$command" in
-            tuev-sued-plan|tuev-sued-check|scrape|build-without-tuev-sued|status) ;;
+            tuev-sued-plan|tuev-sued-check|fsp-check|scrape|build-without-tuev-sued|status) ;;
             *) error="invalid input: command"; command="unknown" ;;
           esac
           if [ -z "$error" ] && [ -n "$run_month" ] && ! [[ "$run_month" =~ ^20[0-9]{2}-(0[1-9]|1[0-2])$ ]]; then
             error="invalid input: run_month (want YYYY-MM)"
           fi
-          if [ -z "$error" ] && [ "$command" = tuev-sued-check ]; then
+          if [ -z "$error" ] && { [ "$command" = tuev-sued-check ] || [ "$command" = fsp-check ]; }; then
+            upload="${command%-check}"; upload="${upload//-/_}_upload"  # tuev_sued_upload / fsp_upload
             if [ -z "$run_month" ] || [ -z "$file" ]; then
-              error="invalid input: tuev-sued-check needs run_month and file"
-            elif ! [[ "$file" =~ ^3_master_output/_monthly/${run_month}/tuev_sued_upload/[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl$ ]]; then
-              error="invalid input: file (want 3_master_output/_monthly/<run_month>/tuev_sued_upload/<name>.jsonl)"
+              error="invalid input: $command needs run_month and file"
+            elif ! [[ "$file" =~ ^3_master_output/_monthly/${run_month}/${upload}/[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl$ ]]; then
+              error="invalid input: file (want 3_master_output/_monthly/<run_month>/${upload}/<name>.jsonl)"
             fi
           elif [ -z "$error" ] && [ -n "$file" ]; then
-            error="invalid input: file is only for tuev-sued-check"
+            error="invalid input: file is only for tuev-sued-check and fsp-check"
           fi
           if [ -n "$error" ]; then
             run_month=""; file=""
@@ -171,6 +172,7 @@ jobs:
           case "$COMMAND" in
             tuev-sued-plan)          args=(tuev-sued plan) ;;
             tuev-sued-check)         args=(tuev-sued check --file "$PRUEFSTELLEN_DATA_ROOT/$UPLOAD_FILE") ;;
+            fsp-check)               args=(fsp check --file "$PRUEFSTELLEN_DATA_ROOT/$UPLOAD_FILE") ;;
             scrape)                  args=(scrape) ;;
             build-without-tuev-sued) args=(build --without-tuev-sued) ;;
             status)                  args=(status); [ -n "$RUN_MONTH" ] && args+=(--month "$RUN_MONTH") ;;
@@ -226,7 +228,7 @@ jobs:
           import json, os
           reason = os.environ.get("STOP_REASON") or "setup failed before checkout"
           body = {"command": os.environ.get("COMMAND", ""), "run_url": os.environ["RUN_URL"],
-                  "status": {"exit_code": 2, "phase": "stopped", "needs_human": [reason]}, "snippet_js": None}
+                  "status": {"exit_code": 2, "phase": "stopped", "needs_human": [reason]}, "snippet_js": None, "fsp_snippet_js": None}
           open(os.environ["PAYLOAD_FILE"], "w", encoding="utf-8").write(json.dumps(body))
           open(os.environ["GITHUB_OUTPUT"], "a").write("exit_code=2\n")
           print("callback: phase stopped, exit 2")

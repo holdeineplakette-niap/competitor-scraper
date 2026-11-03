@@ -124,7 +124,8 @@ def _crawl_checks(checks: list, key: str, crawl: dict) -> None:
 
 def run(mode: str = "simulated", confirm_full_run: bool = False, root=None, now: datetime | None = None,
         client=None, allow_robots_disallowed: bool = False, save_raw: bool = True, source_runs=None,
-        max_pages: int = MAX_PAGES) -> RunResult:
+        max_pages: int = MAX_PAGES, origin: dict | None = None) -> RunResult:
+    """origin: where the pages came from when not from this process (fsp.browser: the snippet's download), kept in the summary."""
     if mode not in RUN_MODES:
         raise ValueError(f"mode must be one of {RUN_MODES}, got {mode!r}")
     if mode == "full" and not confirm_full_run:
@@ -146,6 +147,8 @@ def run(mode: str = "simulated", confirm_full_run: bool = False, root=None, now:
     summary: dict = {"mode": mode, "outcome": "FAIL", "started": scraped_at, "run_dir": str(run_dir),
                      "source_runs": [str(s) for s in (source_runs or [])], "counts": {}, "checks": [], "warnings": [],
                      "robots_override": allow_robots_disallowed, "error": ""}
+    if origin:
+        summary["origin"] = origin
     checks = summary["checks"]
     rows_out: list[dict] = []
     say(f"[{mode}] run folder: {run_dir}")
@@ -245,6 +248,10 @@ def _write_summary(run_dir: Path, summary: dict, client) -> None:
              f"- Robots.txt override (HU filter `d=`): {summary['robots_override']}"]
     if summary["source_runs"]:
         lines.append("- Rebuilt offline from: " + ", ".join(f"`{s}`" for s in summary["source_runs"]))
+    if summary.get("origin"):
+        o = summary["origin"]
+        lines.append(f"- Fetched by: {o.get('fetched_by')} (`{o.get('upload_file')}`, started {o.get('browser_started')}, "
+                     f"{o.get('browser_requests')} requests in the browser)")
     if summary["error"]:
         lines += ["", f"**Stopped: {summary['error']}**"]
     for w in summary["warnings"]:

@@ -2,14 +2,16 @@
 
     .venv\\Scripts\\python.exe -m core.monthly scrape    [--confirm] [--force SLUG ...]
     .venv\\Scripts\\python.exe -m core.monthly tuev-sued plan|check|build [--file X.jsonl] [--confirm]
+    .venv\\Scripts\\python.exe -m core.monthly fsp check --file fsp_YYYY-MM-DD_HHMM.jsonl [--confirm]
     .venv\\Scripts\\python.exe -m core.monthly build     [--confirm] [--without-tuev-sued] [--accept-retirements]
     .venv\\Scripts\\python.exe -m core.monthly status    [--confirm]
 
 The month has up to three trigger moments (n8n starts each one as a GitHub Actions job; 0_instructions/scraper_automation_plan.md):
-  * last working day before the 1st: `tuev-sued plan` writes the pass-1 snippet; Nikos runs it in his browser and uploads the
-    .jsonl; `tuev-sued check --file` imports it (PASS -> the TÜV SÜD run is built; gaps -> the next snippet).
-  * the 1st: `scrape` runs HDP and every scraped source (not TÜV SÜD), one after the other, each in its own process with a
-    wall-clock timeout; a failed source is retried once at the end and never stops the others.
+  * last working day before the 1st: `tuev-sued plan` writes the pass-1 snippet and the FSP snippet; Nikos runs both in his
+    browser and posts the two .jsonl files; `tuev-sued check --file` imports TÜV SÜD (PASS -> the TÜV SÜD run is built; gaps ->
+    the next snippet), `fsp check --file` imports FSP (fsp.de refuses the GitHub runner's IP range, so it is not in `scrape`).
+  * the 1st: `scrape` runs HDP and every scraped source (not TÜV SÜD, not FSP), one after the other, each in its own process
+    with a wall-clock timeout; a failed source is retried once at the end and never stops the others.
   * the master is built by whichever finishes last: `scrape` and `tuev-sued` both call the build when the other half is ready.
     After the timeout n8n calls `build --without-tuev-sued` (TÜV SÜD rows stay active with last month's data).
 
@@ -22,7 +24,10 @@ lifecycle still treats it as not fresh, so none of its rows retire) only if that
 `--accept-retirements` stays a human decision.
 
 Fresh TÜV SÜD: a qualifying TÜV SÜD run whose data started on or after the cycle's reminder day (the last Mon-Fri before the 1st;
-`--cycle-start YYYY-MM-DD` overrides it, e.g. after a holiday).
+`--cycle-start YYYY-MM-DD` overrides it, e.g. after a holiday). Fresh FSP: the same rule. The build never waits for FSP: without a
+fresh upload the master uses the last passing FSP run (a needs-human note); once that is older than MAX_INPUT_AGE_DAYS it is
+pinned (its rows stay active and never retire; TÜV Rheinland lists most FSP sites and keeps them fresh through the merge), up to
+FSP_MAX_AGE_DAYS, then the build stops.
 
 Status: 3_master_output/_monthly/YYYY-MM/monthly_status.json (+ .md), rewritten after every step; the only thing n8n reads.
 `status` rebuilds it from the run folders on disk (no requests), e.g. after a crash.
@@ -60,9 +65,12 @@ from core.export import relative
 
 HDP = "hdp"
 TUEV_SUED = "tuev_sued"
-SCRAPE_ORDER = ("hdp", "tuev_rheinland", "tuev_thueringen", "tuev_nord", "vuek", "fsp", "dekra", "tuev_hessen", "kues", "gtue")
+FSP = "fsp"
+BROWSER_SOURCES = (TUEV_SUED, FSP)  # fetched in a person's browser on the reminder day: fresh from the cycle start on
+SCRAPE_ORDER = ("hdp", "tuev_rheinland", "tuev_thueringen", "tuev_nord", "vuek", "dekra", "tuev_hessen", "kues", "gtue")
 GTUE_KEY = "GTUE_API_KEY"
 MAX_INPUT_AGE_DAYS = master_run.MAX_INPUT_AGE_DAYS
+FSP_MAX_AGE_DAYS = 120  # an FSP run older than MAX_INPUT_AGE_DAYS is pinned up to this age; older stops the build
 BUILD_LOCK = "build.lock"
 STATUS_LOCK = "status.lock"
 BUILD_LOCK_STALE_S = 6 * 3600  # a build lock older than this is left over from a crash
@@ -70,7 +78,7 @@ STATUS_LOCK_WAIT_S = 60
 
 # expected live requests per source (shown in the plan; each source enforces its own caps and delays)
 REQUESTS = {
-    "hdp": "1", "gtue": "~900 (cap 2,000)", "kues": "~182 (cap 900)", "dekra": "6", "fsp": "~45 (robots.txt disregarded, Nikos)",
+    "hdp": "1", "gtue": "~900 (cap 2,000)", "kues": "~182 (cap 900)", "dekra": "6",
     "tuev_nord": "5 (up to 13)", "tuev_rheinland": "4", "tuev_hessen": "3 page loads + 4 searches + 2 detail pages (Playwright)",
     "tuev_thueringen": "2", "vuek": "~16 (11 site + 5 Nominatim)",
 }
@@ -107,11 +115,6 @@ def _run_dekra(mode, root, started, centroids):
     m.run(mode, confirm_full_run=mode == "full", root=root, started_at=started, centroids=centroids, exports=("pruefstellen_csv",))
 
 
-def _run_fsp(mode, root, started, centroids):
-    from fsp import run as m
-    m.run(mode, confirm_full_run=mode == "full", root=root, now=started, allow_robots_disallowed=True)
-
-
 def _run_tuev_nord(mode, root, started, centroids):
     from tuev_nord import run as m
     m.run(mode, confirm_full_run=mode == "full", root=root, now=started, centroids=centroids)
@@ -139,7 +142,7 @@ def _run_vuek(mode, root, started, centroids):
 
 
 RUNNERS: dict[str, Callable] = {
-    "hdp": _run_hdp, "gtue": _run_gtue, "kues": _run_kues, "dekra": _run_dekra, "fsp": _run_fsp, "tuev_nord": _run_tuev_nord,
+    "hdp": _run_hdp, "gtue": _run_gtue, "kues": _run_kues, "dekra": _run_dekra, "tuev_nord": _run_tuev_nord,
     "tuev_rheinland": _run_tuev_rheinland, "tuev_thueringen": _run_tuev_thueringen, "tuev_hessen": _run_tuev_hessen, "vuek": _run_vuek,
 }
 
@@ -219,12 +222,16 @@ def _folder_started(folder: Path) -> datetime | None:
 
 
 # ---- inputs on disk -----------------------------------------------------------------------------------------------
-def fresh_tuev_sued(root: Path, since: datetime) -> mi.Candidate | None:
-    """The newest qualifying TÜV SÜD run whose data started on or after `since` (the cycle start), or None."""
-    for c in mi.candidates(TUEV_SUED, root):
+def fresh_run(slug: str, root: Path, since: datetime) -> mi.Candidate | None:
+    """The newest qualifying run of `slug` whose data started on or after `since` (the cycle start), or None."""
+    for c in mi.candidates(slug, root):
         if c.qualifies and (c.root_started or c.started) >= since:
             return c
     return None
+
+
+def fresh_tuev_sued(root: Path, since: datetime) -> mi.Candidate | None:
+    return fresh_run(TUEV_SUED, root, since)
 
 
 def open_tuev_sued_run(root: Path, since: datetime) -> Path | None:
@@ -406,7 +413,7 @@ def run_source(ctx: Context, slug: str, month: str) -> dict:
 def new_status(month: str, ctx: Context) -> dict:
     return {"month": month, "cycle_start": cycle_start(ctx, month).date().isoformat(), "simulated": ctx.simulated, "phase": "not_started",
             "exit_code": None, "next_action": "", "needs_human": [], "updated_at": None,
-            "scrape": {"started_at": None, "finished_at": None, "sources": {}}, "tuev_sued": {}, "build": {}}
+            "scrape": {"started_at": None, "finished_at": None, "sources": {}}, "tuev_sued": {}, "fsp": {}, "build": {}}
 
 
 def load_status(month: str, root: Path) -> dict | None:
@@ -453,6 +460,9 @@ def needs_human(s: dict) -> list[str]:
     t = s.get("tuev_sued") or {}
     if t.get("status") in ("FAIL", "BLOCKED", "IMPORT_ERROR"):
         out.append(f"TÜV SÜD: {t['status']} ({t.get('message', '')})")
+    f = s.get("fsp") or {}
+    if f.get("status") in ("FAIL", "BLOCKED", "IMPORT_ERROR"):
+        out.append(f"FSP: {f['status']} ({f.get('message', '')})")
     b = s.get("build") or {}
     if b.get("without_tuev_sued"):
         out.append("TÜV SÜD not refreshed: built without it, its rows stay active with last month's data")
@@ -498,6 +508,13 @@ def render_md(s: dict) -> str:
         L.append(f"- snippet to run in the browser: {t['snippet']} (pass {t.get('pass_no')})")
     if t.get("message"):
         L.append(f"- {t['message']}")
+    f = s.get("fsp") or {}
+    L += ["", "## FSP (browser)", f"- status: {f.get('status', 'nothing yet')}; run folder: {f.get('run_folder') or '-'}"
+          + (f"; {f['in_scope']} in scope" if f.get("in_scope") is not None else "")]
+    if f.get("snippet"):
+        L.append(f"- snippet to run in the browser: {f['snippet']}")
+    if f.get("message"):
+        L.append(f"- {f['message']}")
     b = s.get("build") or {}
     L += ["", "## Master", f"- status: {b.get('status', 'not built')}" + (f" ({b['reason']})" if b.get("reason") else "")]
     for k in ("master_dir", "hubspot_changes", "hubspot_changes_overview", "hubspot_api", "hubspot_import", "hubspot_excluded", "master_summary"):
@@ -584,7 +601,8 @@ def build_record(out_dir: Path, summary: dict, root: Path) -> dict:
 
 def plan_inputs(root: Path, month: str, now: datetime, since_tuev: datetime) -> tuple[dict, list[dict], list[str]]:
     """(pins, not_refreshed, problems) for the master. A source whose newest run was rejected is pinned to its newest qualifying
-    run, mirroring the master's own `newer_not_qualifying` rule, but only if that run is at most MAX_INPUT_AGE_DAYS old."""
+    run, mirroring the master's own `newer_not_qualifying` rule, but only if that run is at most MAX_INPUT_AGE_DAYS old.
+    FSP (browser upload, may be skipped in a month) is pinned up to FSP_MAX_AGE_DAYS instead: its rows stay active, none retire."""
     pins, stale, problems = {}, [], []
     start = month_start(month)
     for slug in mi.SOURCE_ORDER:
@@ -596,13 +614,20 @@ def plan_inputs(root: Path, month: str, now: datetime, since_tuev: datetime) -> 
         best = ok[0]
         data = best.root_started or best.started
         age = (now - data).days
-        if any(c.started > data and not c.qualifies for c in cands):
+        newer_failed = any(c.started > data and not c.qualifies for c in cands)
+        if slug == FSP and (newer_failed or age > MAX_INPUT_AGE_DAYS):
+            if age > FSP_MAX_AGE_DAYS:
+                problems.append(f"{label(slug)}: the last passing run {best.run_dir.name} is {age} days old (limit {FSP_MAX_AGE_DAYS}): "
+                                "run the FSP snippet and post its file")
+                continue
+            pins[slug] = best.run_dir.name
+        elif newer_failed:
             if age > MAX_INPUT_AGE_DAYS:
                 problems.append(f"{label(slug)}: newest run failed and the last passing run {best.run_dir.name} is {age} days old "
                                 f"(limit {MAX_INPUT_AGE_DAYS})")
                 continue
             pins[slug] = best.run_dir.name
-        if data < (since_tuev if slug == TUEV_SUED else start):
+        if data < (since_tuev if slug in BROWSER_SOURCES else start):
             stale.append({"slug": slug, "run_folder": best.run_dir.name, "age_days": age})
     return pins, stale, problems
 
@@ -781,7 +806,8 @@ def describe_tuev_sued(ctx: Context, action: str, month: str) -> str:
     fresh = fresh_tuev_sued(ctx.root, since)
     L = [f"tuev-sued {action} for the {month} master (cycle start {since.date().isoformat()}); Python sends no request to TÜV SÜD.",
          f"  fresh TÜV SÜD run: {fresh.run_dir.name if fresh else 'none'}; open run: {open_run.name if open_run else 'none'}"]
-    L.append({"plan": "  would " + ("show the pending snippet of " + open_run.name if open_run else "open a new full run and write the pass-1 snippet"),
+    L.append({"plan": "  would " + ("show the pending snippet of " + open_run.name if open_run else "open a new full run and write the pass-1 snippet")
+                      + " (and the FSP snippet, unless FSP is fresh)",
               "check": "  would import the file, prove coverage, then build the run (PASS) or write the next snippet",
               "build": "  would build the open run as it is (labelled exports if coverage has gaps)"}[action])
     L.append("Nothing was written. Add --confirm to run.")
@@ -811,6 +837,7 @@ def tuev_sued(ctx: Context, action: str, *, confirm: bool = False, file: str | P
         if p is None:
             s = _set(ctx, month, tuev_sued=_tuev_record(folder, ctx.root, "READY_TO_BUILD", "every planned pass is imported: run `tuev-sued build`"))
             return Outcome(s["exit_code"], s)
+        fsp_plan(ctx, month)
         s = _set(ctx, month, phase="tuev_sued_waiting_for_upload", next_action="run the snippet in the browser and post the .jsonl in the TÜV SÜD thread",
                  tuev_sued=_tuev_record(folder, ctx.root, "WAITING_FOR_UPLOAD", f"pass {p.pass_no}: {len(p.queries)} PLZ", p))
         ctx.say(f"TÜV SÜD snippet: {p.js_path}")
@@ -854,6 +881,88 @@ def tuev_sued_simulated(ctx: Context) -> Outcome:
     month = cycle_month(ctx.now().date())
     built = tuev_run.run("simulated", root=ctx.root, started_at=ctx.now(), centroids=ctx.centroids, verbose=False)
     return _after_tuev_build(ctx, month, stage_simulated(TUEV_SUED, Path(built.run_folder), ctx.root))
+
+
+def _fsp_record(c: mi.Candidate, root: Path, message: str = "") -> dict:
+    return {"status": "PASS", "run_folder": relative(c.run_dir, root), "in_scope": mi.summary_in_scope(c.summary), "message": message,
+            "snippet": None, "upload": (c.summary.get("origin") or {}).get("upload_file")}
+
+
+def fsp_plan(ctx: Context, month: str) -> dict:
+    """Write the FSP snippet into the month folder (the callback sends it to Slack with the TÜV SÜD pass 1), unless FSP is fresh."""
+    from fsp import browser
+
+    fresh = fresh_run(FSP, ctx.root, cycle_start(ctx, month))
+    if fresh is not None:
+        return _set(ctx, month, fsp=_fsp_record(fresh, ctx.root, "fresh FSP run of this cycle: no snippet needed"))
+    js = browser.write_snippet(paths.monthly_dir(month, ctx.root) / browser.SNIPPET_NAME)
+    ctx.say(f"FSP snippet: {js}")
+    return _set(ctx, month, fsp={"status": "WAITING_FOR_UPLOAD", "run_folder": None, "in_scope": None, "upload": None,
+                                 "snippet": relative(js, ctx.root), "message": "run the FSP snippet on www.fsp.de/standorte and post its .jsonl"})
+
+
+def describe_fsp(ctx: Context, month: str) -> str:
+    fresh = fresh_run(FSP, ctx.root, cycle_start(ctx, month))
+    return "\n".join([f"fsp check for the {month} master (cycle start {cycle_start(ctx, month).date().isoformat()}); Python sends no request to fsp.de.",
+                      f"  fresh FSP run: {fresh.run_dir.name if fresh else 'none'}",
+                      "  would import the file into 1_scrapers/fsp/output/<browser start>_full and parse it with fsp.run's checks",
+                      "Nothing was written. Add --confirm to run."])
+
+
+def fsp(ctx: Context, action: str, *, confirm: bool = False, file: str | Path | None = None, month: str | None = None) -> Outcome:
+    """Import the FSP snippet's download. Never builds and never waits: the master takes the newest passing FSP run it finds."""
+    from fsp import browser
+
+    if action != "check":
+        raise ValueError("action must be check")
+    month = month or cycle_month(ctx.now().date())
+    if not confirm:
+        ctx.say(describe_fsp(ctx, month))
+        return Outcome(0, None, "plan only")
+    if file is None:
+        raise ValueError("fsp check needs --file (the downloaded .jsonl)")
+    file = Path(file)
+    try:
+        done = browser.imported_before(browser.file_sha256(file), ctx.root) if file.is_file() else None
+        if done is not None:
+            ctx.say(f"{file.name} was imported before ({done.name}): nothing to do")
+            c = next((x for x in mi.candidates(FSP, ctx.root) if x.run_dir == done), None)
+            rec = _fsp_record(c, ctx.root, "imported before") if c is not None and c.qualifies else (load_status(month, ctx.root) or {}).get("fsp") or {}
+            s = _set(ctx, month, fsp=rec)
+            return Outcome(s["exit_code"], s, "already imported")
+        res = browser.import_download(file, root=ctx.root, say=ctx.say)
+    except browser.Blocked as exc:
+        s = _set(ctx, month, fsp={"status": "BLOCKED", "run_folder": None, "in_scope": None, "snippet": None, "upload": file.name,
+                                  "message": f"{exc}; the master keeps the last passing FSP run"})
+        return Outcome(s["exit_code"], s)
+    except (browser.ImportProblem, OSError) as exc:
+        s = _set(ctx, month, fsp={"status": "IMPORT_ERROR", "run_folder": None, "in_scope": None, "snippet": None, "upload": file.name,
+                                  "message": f"{type(exc).__name__}: {exc}"})
+        return Outcome(s["exit_code"], s)
+    except Exception as exc:  # the parse stopped (PaginationError, BlockedError on a non-result page, ...): the run folder says FAIL
+        s = _set(ctx, month, fsp={"status": "FAIL", "run_folder": None, "in_scope": None, "snippet": None, "upload": file.name,
+                                  "message": f"{type(exc).__name__}: {exc}"[:500]})
+        return Outcome(s["exit_code"], s)
+    ok = res.outcome == "PASS"
+    s = _set(ctx, month, fsp={"status": "PASS" if ok else "FAIL", "run_folder": relative(res.run_dir, ctx.root), "in_scope": len(res.frame),
+                              "snippet": None, "upload": file.name,
+                              "message": "" if ok else "checks failed: " + "; ".join(c["check"] for c in res.summary["checks"] if not c["ok"])})
+    return Outcome(s["exit_code"], s)
+
+
+def fsp_simulated(ctx: Context) -> Outcome:
+    """Simulated only (notebook, tests): the FSP run offline against the fake fsp.de, staged into output/ like an imported upload."""
+    from fsp import run as fsp_run
+    from fsp.simulate import SimulatedFsp
+
+    if not ctx.simulated:
+        raise ValueError("fsp_simulated needs a simulated context")
+    month = cycle_month(ctx.now().date())
+    res = fsp_run.run("simulated", root=ctx.root, now=ctx.now(), client=SimulatedFsp(), allow_robots_disallowed=True)
+    folder = stage_simulated(FSP, res.run_dir, ctx.root)
+    s = _set(ctx, month, fsp={"status": "PASS" if res.outcome == "PASS" else "FAIL", "run_folder": relative(folder, ctx.root),
+                              "in_scope": len(res.frame), "snippet": None, "upload": None, "message": "simulated"})
+    return Outcome(s["exit_code"], s)
 
 
 def describe_build(ctx: Context, without_tuev_sued: bool) -> str:
@@ -913,6 +1022,9 @@ def status_from_disk(ctx: Context, month: str) -> dict:
         s["tuev_sued"] = {**_tuev_record(fresh.run_dir, ctx.root, "PASS", fresh.why), "in_scope": mi.summary_in_scope(fresh.summary)}
     elif open_run is not None and not s["tuev_sued"].get("run_folder"):
         s["tuev_sued"] = _tuev_record(open_run, ctx.root, "WAITING_FOR_UPLOAD", "open run found on disk")
+    fresh_fsp = fresh_run(FSP, ctx.root, csince)
+    if fresh_fsp is not None:
+        s["fsp"] = _fsp_record(fresh_fsp, ctx.root, "found on disk")
     done = _master_dir_of(s, ctx, month)
     if done is not None and (done / "master_summary.json").exists():
         b = s.get("build") or {}
@@ -962,12 +1074,15 @@ def main(argv=None) -> int:
     p_tuev = sub.add_parser("tuev-sued", help="TÜV SÜD: plan (snippet), check an upload, build the run")
     p_tuev.add_argument("action", choices=["plan", "check", "build"])
     p_tuev.add_argument("--file", help="check: the downloaded .jsonl")
+    p_fsp = sub.add_parser("fsp", help="FSP: check (import) the browser snippet's download")
+    p_fsp.add_argument("action", choices=["check"])
+    p_fsp.add_argument("--file", required=True, help="the downloaded fsp_YYYY-MM-DD_HHMM.jsonl")
     p_build = sub.add_parser("build", help="the official master of this month")
     p_build.add_argument("--without-tuev-sued", action="store_true", help="timeout: build with last month's TÜV SÜD data")
     p_build.add_argument("--accept-retirements", action="store_true", help="a human decided: the mass-retirement check becomes a review item")
     p_status = sub.add_parser("status", help="rebuild the status file from disk (no requests)")
     p_status.add_argument("--month", help="YYYY-MM (default: the current cycle)")
-    for p in (p_scrape, p_tuev, p_build, p_status):
+    for p in (p_scrape, p_tuev, p_fsp, p_build, p_status):
         p.add_argument("--confirm", action="store_true", help="really run (without it: print the plan only)")
         p.add_argument("--cycle-start", type=date.fromisoformat, help="the TÜV SÜD reminder day of this cycle, YYYY-MM-DD")
     a = ap.parse_args(argv)
@@ -977,6 +1092,8 @@ def main(argv=None) -> int:
         res = scrape(ctx, confirm=a.confirm, force=a.force)
     elif a.command == "tuev-sued":
         res = tuev_sued(ctx, a.action, confirm=a.confirm, file=a.file)
+    elif a.command == "fsp":
+        res = fsp(ctx, a.action, confirm=a.confirm, file=a.file)
     elif a.command == "build":
         res = build(ctx, confirm=a.confirm, without_tuev_sued=a.without_tuev_sued, accept_retirements=a.accept_retirements)
     else:

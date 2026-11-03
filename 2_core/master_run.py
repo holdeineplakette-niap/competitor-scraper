@@ -134,6 +134,12 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
                              "pinned": bool((pins if pins is not None else mi.PINS).get(slug))}
 
     prev_path = paths.latest_official_master(root, before_month=month if mode == "official" else None)
+    # data that already fed the previous master is no new evidence: the lifecycle must not count a missing site twice on it
+    prev_manifest = prev_path.parent / "input_manifest.csv" if prev_path else None
+    if prev_manifest is not None and prev_manifest.exists():
+        before = {r["slug"]: r.get("data_started", "") for r in mi.read_source_csv(prev_manifest).to_dict("records")}
+        for slug, n in input_notes.items():
+            n["reused"] = bool(before.get(slug)) and before[slug] == n["data_started"]
     try:
         prev = read_master(prev_path) if prev_path else None
         if prev is not None and prev.empty:
