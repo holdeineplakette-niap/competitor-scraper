@@ -221,11 +221,11 @@ def test_second_month_keeps_ids_reports_changes_and_first_seen(root):
     assert marburg_old == marburg_new
     d = second.diff
     assert ("changed", "phone") in set(zip(d["change"], d["field"]))
-    assert {"new", "retired"} <= set(d["change"]) and "disappeared" not in set(d["change"])  # a vanished site is retired, never dropped
-    gone = second.master[second.master["status"] == "retired"]
-    assert len(gone) == 1 and gone.iloc[0]["retired_on"] == "2026-11-03" and gone.iloc[0]["needs_review"] == "True"
-    assert gone.iloc[0]["needs_review_reason"] == "retired" and gone.iloc[0]["master_id"] in set(first.master["master_id"])
-    assert (second.master["needs_review"] == "True").sum() == 1  # nothing else is ever flagged
+    assert "new" in set(d["change"]) and not {"retired", "disappeared"} & set(d["change"])  # one fresh miss: kept, never dropped
+    gone = second.master[second.master["missed_runs"] == "1"]
+    assert len(gone) == 1 and gone.iloc[0]["status"] == "active" and gone.iloc[0]["needs_review"] == "False"
+    assert gone.iloc[0]["master_id"] in set(first.master["master_id"]) and (second.master["status"] == "retired").sum() == 0
+    assert (second.master["needs_review"] == "True").sum() == 0  # nothing is flagged before a status change
     assert second.master.set_index("master_id").loc[marburg_new, "first_seen"] == "2026-10-06"
     assert second.master.set_index("master_id").loc[marburg_new, "last_seen"] == "2026-11-03"
     assert second.out_dir == paths.master_output_dir("2026-11", root)
@@ -559,23 +559,27 @@ def test_line_breaks_in_raw_text_never_break_the_csv_rows(tmp_path):
     assert "line one line two line three" in (res.out_dir / "pruefstellen_extra_tuev_hessen_2026-10.csv").read_text(encoding="utf-8-sig")
 
 
-def test_the_registry_keeps_a_vanished_id_from_being_reissued_across_months(tmp_path):
+def test_the_registry_keeps_a_vanished_id_from_being_reissued_across_months(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_run, "MAX_INPUT_AGE_DAYS", 1000)  # the synthetic sources stay from October
     world(tmp_path, gtue=rows("G", 3))
     m1 = go(tmp_path, "official", confirm=True)
     write_source(tmp_path, "gtue", rows("G", 2) + [source_row("gtue", "GTUE-NEW", name="n", street="Neustr. 1", zip="01067", city="Dresden", lat="51.06", lng="13.74")],
                  run="2026-11-02_1000_full")
     m2 = go(tmp_path, "official", at=T2, confirm=True, check_volume=False)
-    gone = set(m2.master.loc[m2.master["status"] == "retired", "master_id"])  # the vanished id stays in the master, retired
+    gone = set(m2.master.loc[m2.master["missed_runs"] == "1", "master_id"])  # the vanished id stays in the master, missing once
     new = set(m2.master["master_id"]) - set(m1.master["master_id"])
     assert len(gone) == 1 and len(new) == 1 and gone.isdisjoint(new) and gone <= set(m1.master["master_id"])
     assert m2.summary["max_master_id_issued"] == max(set(m2.master["master_id"]) | set(m1.master["master_id"]))
     write_source(tmp_path, "gtue", rows("G", 2), run="2026-12-02_1000_full")
-    m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True, check_volume=False)
-    assert set(m3.master["master_id"]) == set(m2.master["master_id"])  # nothing dropped, nothing reissued
-    status = dict(zip(m3.master["master_id"], m3.master["status"]))
-    assert all(status[i] == "retired" for i in gone | new)  # the first one was retired in month 2, the new one in month 3
-    retired_on = dict(zip(m3.master["master_id"], m3.master["retired_on"]))
-    assert {retired_on[i] for i in gone} == {"2026-11-03"} and {retired_on[i] for i in new} == {"2026-12-03"}
+    m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True, check_volume=False, accept_retirements=True)
+    write_source(tmp_path, "gtue", rows("G", 2), run="2027-01-02_1000_full")
+    m4 = go(tmp_path, "official", at=datetime(2027, 1, 3, 9, 0), confirm=True, check_volume=False)
+    assert m3.status == m4.status == "PASS"
+    assert set(m4.master["master_id"]) == set(m3.master["master_id"]) == set(m2.master["master_id"])  # nothing dropped, nothing reissued
+    status = dict(zip(m4.master["master_id"], m4.master["status"]))
+    assert all(status[i] == "retired" for i in gone | new)  # the first one after its second miss (month 3), the new one in month 4
+    retired_on = dict(zip(m4.master["master_id"], m4.master["retired_on"]))
+    assert {retired_on[i] for i in gone} == {"2026-12-03"} and {retired_on[i] for i in new} == {"2027-01-03"}
 
 
 def test_a_malformed_overrides_file_or_previous_master_fails_with_a_summary_not_a_traceback(root):
@@ -610,7 +614,7 @@ def test_the_id_registry_does_not_depend_on_the_summary_file(tmp_path, monkeypat
     m1 = go(tmp_path, "official", confirm=True)
     write_source(tmp_path, "gtue", rows("G", 2), run="2026-11-02_1000_full")
     m2 = go(tmp_path, "official", at=T2, confirm=True)
-    gone = m2.master.loc[m2.master["status"] == "retired", "master_id"].iloc[0]
+    gone = m2.master.loc[m2.master["missed_runs"] == "1", "master_id"].iloc[0]  # retired with its second miss in month 3
     for p in paths.master_output_dir("2026-11", tmp_path).glob("master_summary.json"):
         p.unlink()  # the registry file is gone
     write_source(tmp_path, "gtue", rows("G", 2) + [source_row("gtue", "GTUE-NEW", name="n", street="Neustr. 1", zip="01067", city="Dresden", lat="51.06", lng="13.74")],
@@ -618,7 +622,9 @@ def test_the_id_registry_does_not_depend_on_the_summary_file(tmp_path, monkeypat
     m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True)
     new_id = m3.master.loc[m3.master["source_ids"] == "GTUE-NEW", "master_id"].iloc[0]
     assert new_id != gone and m3.status == "PASS"  # the retired id is not handed out again
-    assert m3.master.set_index("master_id").loc[gone, "status"] == "retired"
+    row = m3.master.set_index("master_id").loc[gone]
+    # month 2 failed its volume check (3 -> 2 rows, not accepted), so month 3 compares with month 1: a first fresh miss
+    assert (row["status"], row["missed_runs"]) == ("active", "1")
 
 
 def test_a_street_less_row_with_an_unknown_plz_gets_both_reasons_and_the_run_still_passes(tmp_path):

@@ -3,6 +3,7 @@
     first import   hubspot_import_YYYY-MM.csv    every ACTIVE row (the first master has no earlier month)
     every month    hubspot_changes_YYYY-MM.csv   only new / changed / retired / reactivated rows against the previous master
                    hubspot_changes_overview_YYYY-MM.csv   one line per change (for people; not for the import)
+                   hubspot_changelog_YYYY-MM.xlsx   the overview formatted, one sheet per change kind (n8n 03 posts it in Slack)
                    hubspot_api_YYYY-MM.json      the same changes as HubSpot batch API calls (n8n sends them after the Slack approval)
     both           hubspot_excluded_YYYY-MM.csv  rows kept out of the import and why
 
@@ -175,7 +176,12 @@ def monthly_changes(prev: pd.DataFrame, cur: pd.DataFrame) -> tuple[pd.DataFrame
                 add("changed", mid, {h: row[h] for h in diff}, ", ".join(diff))
     for mid in prev_h.index:  # in HubSpot as active, retired now: only the status is written
         if cur_status.get(mid) == "retired":
-            add("retired", mid, {STATUS: STATUS_VALUES["retired"], RETIRED_ON: cur_meta[mid]["retired_on"]}, "status, retired date")
+            closed = {STATUS: STATUS_VALUES["retired"], RETIRED_ON: cur_meta[mid]["retired_on"]}
+            dup = next((x.split(":", 1)[1] for x in _flags(cur_meta[mid]) if x.startswith("duplicate_of:")), "")
+            if dup:  # a duplicate of another row is closed, but it is no closure of a site: CHANGED (Nikos, 2026-11-03)
+                add("changed", mid, closed, f"duplicate of {dup}: closed")
+            else:
+                add("retired", mid, closed, "status, retired date")
     order = {"new": 0, "reactivated": 1, "changed": 2, "retired": 3}
     imp = pd.DataFrame(rows, columns=HEADERS)
     ov = pd.DataFrame(overview, columns=OVERVIEW_COLUMNS)
@@ -261,6 +267,79 @@ def test_sample(imp: pd.DataFrame, n: int = 50) -> pd.DataFrame:
     return imp.loc[sorted(picked[:n])].reset_index(drop=True)
 
 
+CHANGELOG_SHEETS = {"retired": "Retired", "new": "New", "changed": "Changed", "reactivated": "Reactivated"}  # sheet order
+CHANGELOG_TAB_COLORS = {"retired": "C0504D", "new": "70AD47", "changed": "ED7D31", "reactivated": "4472C4"}
+# master column -> header, in sheet order (Nikos, 2026-11-03: enough to look a site up); + Retired on / Fields changed per sheet
+CHANGELOG_COLUMNS = {"master_id": "PS-ID", "uo": "ÜO", "name": "Name", "operator_name": "Operator", "street": "Street",
+                     "zip": "PLZ", "city": "City", "state": "State", "phone": "Phone", "email": "E-mail", "website": "Website"}
+CHANGELOG_MAPS = "Google Maps"
+
+
+def changelog_name(month: str, tag: str = "") -> str:
+    return f"hubspot_changelog{tag}_{month}.xlsx"
+
+
+def changelog_frames(ov: pd.DataFrame, master: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Sheet name -> rows of the changelog: the overview's sites with their master data (this month's master holds the
+    retired sites too), sorted by ÜO, city and name. Retired adds the retired-on date, Changed the changed fields."""
+    from urllib.parse import quote_plus
+
+    m = master_lifecycle.with_lifecycle_columns(master).fillna("").astype(str)
+    m = m.drop_duplicates("master_id").set_index("master_id", drop=False).rename_axis(None)
+    missing = sorted(set(ov[ID]) - set(m.index))
+    if missing:
+        raise ValueError(f"changelog: {len(missing)} sites not in the master, e.g. {missing[:5]}")
+    out = {}
+    for kind, sheet in CHANGELOG_SHEETS.items():
+        rows = ov[ov["change"] == kind]
+        if kind == "reactivated" and rows.empty:
+            continue
+        f = m.loc[list(rows[ID]), [c for c in CHANGELOG_COLUMNS if c in m.columns]].copy()
+        f[CHANGELOG_MAPS] = ["https://www.google.com/maps/search/?api=1&query=" + quote_plus(" ".join(x for x in v if x))
+                             for v in zip(f["name"], f["street"], f["zip"], f["city"])]
+        if kind == "retired":
+            f["Retired on"] = m.loc[f.index, "retired_on"]
+        if kind == "changed":
+            f["Fields changed"] = list(rows.set_index(ID).loc[f.index, "fields"])
+        out[sheet] = f.sort_values(["uo", "city", "name", "master_id"]).rename(columns=CHANGELOG_COLUMNS).reset_index(drop=True)
+    return out
+
+
+def write_changelog_xlsx(ov: pd.DataFrame, master: pd.DataFrame, path: Path) -> None:
+    """The overview as a formatted Excel for people (posted in Slack by n8n 03; never imported): one sheet per change kind,
+    Retired / New / Changed (Reactivated only when there are any), see changelog_frames."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    kinds = {v: k for k, v in CHANGELOG_SHEETS.items()}
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        for sheet, frame in changelog_frames(ov, master).items():
+            kind = kinds[sheet]
+            cols = list(frame.columns)
+            frame.to_excel(writer, index=False, sheet_name=sheet)
+            ws = writer.sheets[sheet]
+            ws.sheet_properties.tabColor = CHANGELOG_TAB_COLORS[kind]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(1, len(frame)) + 1}"
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor=CHANGELOG_TAB_COLORS[kind])
+                cell.alignment = Alignment(vertical="center")
+            ws.row_dimensions[1].height = 20
+            for i, col in enumerate(cols, start=1):
+                letter = get_column_letter(i)
+                width = 12 if col == CHANGELOG_MAPS else max([len(col)] + [len(str(v)) for v in frame[col]])
+                ws.column_dimensions[letter].width = min(width + 3, 45)
+                for cell in ws[letter][1:]:
+                    if col in ("PS-ID", "PLZ", "Phone"):
+                        cell.number_format = "@"  # leading zeros
+                    elif col in (CHANGELOG_MAPS, "Website") and cell.value:
+                        cell.hyperlink = str(cell.value)
+                        cell.font = Font(color="0563C1", underline="single")
+                        if col == CHANGELOG_MAPS:
+                            cell.value = "Open map"
+
+
 def write_hubspot_csv(df: pd.DataFrame, path: Path) -> None:
     out = df.fillna("").astype(str)
     for col in out.columns:
@@ -290,7 +369,7 @@ def main(argv=None) -> int:
     if a.sample and prev is None:
         files[f"hubspot_test_sample_{month}.csv"] = test_sample(files[f"hubspot_import_{month}.csv"], a.sample)
     api = api_for_run(files, month)
-    clash = [out / n for n in [*files, *([api[0]] if api else [])] if (out / n).exists()]
+    clash = [out / n for n in [*files, *([api[0], changelog_name(month)] if api else [])] if (out / n).exists()]
     if clash:  # nothing is written if any file exists: never a half-written set
         print("not overwritten, already exist: " + ", ".join(str(c) for c in clash))
         return 2
@@ -300,6 +379,9 @@ def main(argv=None) -> int:
     if api:
         write_api_json(api[1], out / api[0])
         print(f"{out / api[0]}: {api[1]['rows']} rows")
+        ov = files[f"hubspot_changes_overview_{month}.csv"]
+        write_changelog_xlsx(ov, master, out / changelog_name(month))
+        print(f"{out / changelog_name(month)}: {len(ov)} rows")
     return 0
 
 

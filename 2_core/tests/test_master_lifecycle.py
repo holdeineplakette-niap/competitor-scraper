@@ -34,24 +34,62 @@ def by_id(df) -> dict:
 
 
 # ---- master_lifecycle.apply ------------------------------------------------------------------------------------------------------
-def test_a_row_that_no_group_claims_is_retired_at_once_with_its_last_values():
+def test_a_row_missed_by_one_fresh_run_stays_active_and_the_second_miss_retires_it_with_its_last_values():
     prev = frame(mrow("PS-000001"), mrow("PS-000002"))
     cur = frame(mrow("PS-000001"))
-    life = ml.apply(cur, prev, "2026-11-03", FRESH)
-    r = by_id(life.master)
+    first = ml.apply(cur, prev, "2026-11-03", FRESH)
+    r = by_id(first.master)
     assert set(r) == {"PS-000001", "PS-000002"}  # nothing is dropped
+    assert (r["PS-000002"]["status"], r["PS-000002"]["missed_runs"], r["PS-000002"]["needs_review"]) == ("active", "1", "False")
+    assert first.info["retired"] == [] and first.info["missing"] == [{"master_id": "PS-000002", "missed_runs": 1, "last_seen": "2026-10-06"}]
+    life = ml.apply(cur, first.master, "2026-12-03", FRESH)
+    r = by_id(life.master)
     gone = r["PS-000002"]
-    assert (gone["status"], gone["retired_on"], gone["needs_review"], gone["needs_review_reason"]) == ("retired", "2026-11-03", "True", "retired")
+    assert (gone["status"], gone["retired_on"], gone["needs_review"], gone["needs_review_reason"]) == ("retired", "2026-12-03", "True", "retired")
     assert gone["name"] == "Name PS-000002" and gone["phone"] == "0351 1" and gone["last_seen"] == "2026-10-06"  # last known values
-    assert r["PS-000001"]["status"] == "active" and r["PS-000001"]["needs_review"] == "False"
+    assert gone["missed_runs"] == "2" and "duplicate_of" not in gone["doubt_flags"]
+    assert r["PS-000001"]["status"] == "active" and r["PS-000001"]["needs_review"] == "False" and r["PS-000001"]["missed_runs"] == "0"
     assert life.info["retired"] == ["PS-000002"] and life.info["retired_by_source"] == {"gtue": 1}
 
 
+def test_a_stale_run_between_two_misses_neither_counts_nor_resets_and_a_site_back_after_one_miss_is_simply_active():
+    prev = frame(mrow("PS-000001", missed_runs="1"))
+    stale = ml.apply(frame(), prev, "2026-12-03", {"gtue": False})  # the GTÜ run of December was rejected
+    row = by_id(stale.master)["PS-000001"]
+    assert (row["status"], row["missed_runs"]) == ("active", "1") and stale.info["retired"] == []
+    done = ml.apply(frame(), stale.master, "2027-01-03", FRESH)  # January works and it is still not there
+    assert by_id(done.master)["PS-000001"]["status"] == "retired" and done.info["retired"] == ["PS-000001"]
+    back = by_id(ml.apply(frame(mrow("PS-000001")), prev, "2026-12-03", FRESH).master)["PS-000001"]
+    assert (back["status"], back["missed_runs"], back["needs_review"]) == ("active", "0", "False")  # never retired: no reactivation
+
+
+def test_a_merged_row_is_closed_at_once_as_a_duplicate_and_exported_as_changed():
+    prev = frame(mrow("PS-000001"), mrow("PS-000002"))
+    cur = frame(mrow("PS-000001", source_ids="GTUE-PS-000001|GTUE-PS-000002"))
+    life = ml.apply(cur, prev, "2026-11-03", FRESH, {"PS-000002": "PS-000001"})
+    row = by_id(life.master)["PS-000002"]
+    assert row["status"] == "retired" and "duplicate_of:PS-000001" in row["doubt_flags"]
+    assert life.info["duplicates"] == [{"master_id": "PS-000002", "of": "PS-000001"}]
+    imp, ov, _ = hx.monthly_changes(prev, life.master)
+    assert ov[["change", hx.ID, "fields"]].values.tolist() == [["changed", "PS-000002", "duplicate of PS-000001: closed"]]
+    assert imp.iloc[0]["compscraper_business_status"] == "scraper-geschlossen"  # closed in HubSpot, never a RETIRED row
+
+
+def test_a_row_gone_twice_next_to_an_active_row_of_its_uo_at_its_address_is_a_duplicate_not_a_closure():
+    prev = frame(mrow("PS-000001", street="Hauptstr. 5"), mrow("PS-000002", street="Hauptstraße 5", missed_runs="1"),
+                 mrow("PS-000003", street="Hauptstr. 5", uo="KÜS", listed_by="kues", missed_runs="1"))
+    cur = frame(mrow("PS-000001", street="Hauptstr. 5"))
+    r = by_id(ml.apply(cur, prev, "2026-12-03", FRESH).master)
+    assert r["PS-000002"]["status"] == "retired" and "duplicate_of:PS-000001" in r["PS-000002"]["doubt_flags"]
+    assert r["PS-000003"]["status"] == "retired" and "duplicate_of" not in r["PS-000003"]["doubt_flags"]  # another ÜO: a closure
+
+
 def test_a_stale_source_never_retires_its_rows_they_stay_active_and_flagged():
-    prev = frame(mrow("PS-000001"), mrow("PS-000002", listed_by="gtue|kues"))
+    prev = frame(mrow("PS-000001", missed_runs="1"), mrow("PS-000002", listed_by="gtue|kues"))
     life = ml.apply(frame(), prev, "2026-11-03", {"gtue": True, "kues": False})
     r = by_id(life.master)
-    assert r["PS-000001"]["status"] == "retired"  # its only source is fresh
+    assert r["PS-000001"]["status"] == "retired"  # its only source is fresh (second miss)
+    assert r["PS-000002"]["missed_runs"] == "0"  # a stale source does not count
     kept = r["PS-000002"]  # one of its two sources is stale: not a closure
     assert kept["status"] == "active" and kept["needs_review"] == "False" and "not_refreshed:kues" in kept["doubt_flags"]
     assert life.info["not_refreshed"] == [{"master_id": "PS-000002", "sources": ["kues"]}]
@@ -76,7 +114,7 @@ def test_a_retired_id_that_comes_back_is_active_again_and_flagged_reactivated_fo
 
 
 def test_a_retired_row_and_a_new_row_at_one_address_are_flagged_and_not_merged():
-    prev = frame(mrow("PS-000001", street="Hauptstr. 5"), mrow("PS-000002", street="Nebenstr. 9"))
+    prev = frame(mrow("PS-000001", street="Hauptstr. 5", missed_runs="1"), mrow("PS-000002", street="Nebenstr. 9"))
     cur = frame(mrow("PS-000002", street="Nebenstr. 9"), mrow("PS-000003", street="Hauptstraße 5", source_ids="GTUE-NEW"))
     life = ml.apply(cur, prev, "2026-11-03", FRESH)
     r = by_id(life.master)
@@ -101,7 +139,7 @@ def old_inputs_are_fresh(monkeypatch):
     monkeypatch.setattr(master_run, "MAX_INPUT_AGE_DAYS", 1000)  # the synthetic sources stay from October
 
 
-def test_retire_and_reactivate_across_three_months_keep_the_id_and_flag_one_run_only(tmp_path, old_inputs_are_fresh):
+def test_retire_after_two_fresh_misses_and_reactivate_keep_the_id_and_flag_one_run_only(tmp_path, old_inputs_are_fresh):
     world(tmp_path, gtue=rows("G", 3))
     m1 = go(tmp_path, "official", confirm=True)
     assert m1.status == "PASS" and (m1.master["needs_review"] == "False").all() and set(m1.master["status"]) == {"active"}
@@ -109,18 +147,24 @@ def test_retire_and_reactivate_across_three_months_keep_the_id_and_flag_one_run_
     write_source(tmp_path, "gtue", rows("G", 2), run="2026-11-02_1000_full")
     m2 = go(tmp_path, "official", at=T2, confirm=True, accept_retirements=True)
     row = m2.master.set_index("master_id").loc[vanished]
-    assert m2.status == "PASS" and (row["status"], row["retired_on"], row["needs_review_reason"]) == ("retired", "2026-11-03", "retired")
-    assert (m2.master["needs_review"] == "True").sum() == 1 and m2.summary["lifecycle"]["retired"] == [vanished]
-    assert (m2.diff["change"] == "retired").sum() == 1 and "disappeared" not in set(m2.diff["change"])
-    write_source(tmp_path, "gtue", rows("G", 3), run="2026-12-02_1000_full")  # it is listed again
+    assert m2.status == "PASS" and (row["status"], row["missed_runs"], row["needs_review"]) == ("active", "1", "False")
+    assert m2.summary["lifecycle"]["retired"] == [] and [x["master_id"] for x in m2.summary["lifecycle"]["missing"]] == [vanished]
+    assert "retired" not in set(m2.diff["change"])
+    write_source(tmp_path, "gtue", rows("G", 2), run="2026-12-02_1000_full")  # still gone: the second fresh miss
     m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True)
-    back = m3.master.set_index("master_id").loc[vanished]
-    assert (back["status"], back["retired_on"], back["needs_review_reason"]) == ("active", "", "reactivated")
-    assert back["first_seen"] == "2026-10-06" and set(m3.master["master_id"]) == set(m1.master["master_id"])
-    assert (m3.diff["change"] == "reactivated").sum() == 1
-    write_source(tmp_path, "gtue", rows("G", 3), run="2027-01-02_1000_full")
+    row = m3.master.set_index("master_id").loc[vanished]
+    assert m3.status == "PASS" and (row["status"], row["retired_on"], row["needs_review_reason"]) == ("retired", "2026-12-03", "retired")
+    assert (m3.master["needs_review"] == "True").sum() == 1 and m3.summary["lifecycle"]["retired"] == [vanished]
+    assert (m3.diff["change"] == "retired").sum() == 1 and "disappeared" not in set(m3.diff["change"])
+    write_source(tmp_path, "gtue", rows("G", 3), run="2027-01-02_1000_full")  # it is listed again
     m4 = go(tmp_path, "official", at=datetime(2027, 1, 3, 9, 0), confirm=True)
-    assert (m4.master["needs_review"] == "False").all() and set(m4.master["status"]) == {"active"}
+    back = m4.master.set_index("master_id").loc[vanished]
+    assert (back["status"], back["retired_on"], back["needs_review_reason"], back["missed_runs"]) == ("active", "", "reactivated", "0")
+    assert back["first_seen"] == "2026-10-06" and set(m4.master["master_id"]) == set(m1.master["master_id"])
+    assert (m4.diff["change"] == "reactivated").sum() == 1
+    write_source(tmp_path, "gtue", rows("G", 3), run="2027-02-02_1000_full")
+    m5 = go(tmp_path, "official", at=datetime(2027, 2, 3, 9, 0), confirm=True)
+    assert (m5.master["needs_review"] == "False").all() and set(m5.master["status"]) == {"active"}
 
 
 def test_a_stale_input_keeps_the_vanished_rows_active_through_the_run(tmp_path, monkeypatch, old_inputs_are_fresh):
@@ -142,7 +186,7 @@ def test_mass_retirement_fails_the_run_unless_it_is_accepted(tmp_path, old_input
     blocked = go(tmp_path, "dev", at=T2)
     assert blocked.status == "FAIL" and any("mass retirement" in c["check"] and not c["ok"] and c["severity"] == "hard" for c in blocked.summary["checks"])
     accepted = go(tmp_path, "dev", at=T2, accept_retirements=True)
-    assert accepted.status == "PASS" and len(accepted.summary["lifecycle"]["retired"]) == 5
+    assert accepted.status == "PASS" and len(accepted.summary["lifecycle"]["missing"]) == 5 and accepted.summary["lifecycle"]["retired"] == []
     assert any("mass retirement" in c["check"] and not c["ok"] and c["severity"] == "review" for c in accepted.summary["checks"])
 
 
@@ -224,14 +268,27 @@ def test_a_run_writes_the_hubspot_files_next_to_the_master(tmp_path, old_inputs_
     assert not (m1.out_dir / "hubspot_changes_2026-10.csv").exists()
     write_source(tmp_path, "gtue", rows("G", 2), run="2026-11-02_1000_full")
     m2 = go(tmp_path, "official", at=T2, confirm=True, accept_retirements=True)
-    ch = pd.read_csv(m2.out_dir / "hubspot_changes_2026-11.csv", sep=",", dtype=str, keep_default_na=False)
-    ov = pd.read_csv(m2.out_dir / "hubspot_changes_overview_2026-11.csv", sep=",", dtype=str, keep_default_na=False)
+    ov2 = pd.read_csv(m2.out_dir / "hubspot_changes_overview_2026-11.csv", sep=",", dtype=str, keep_default_na=False)
+    assert ov2.empty  # one fresh miss: nothing for HubSpot yet
+    write_source(tmp_path, "gtue", rows("G", 2), run="2026-12-02_1000_full")
+    m3 = go(tmp_path, "official", at=datetime(2026, 12, 3, 9, 0), confirm=True)
+    ch = pd.read_csv(m3.out_dir / "hubspot_changes_2026-12.csv", sep=",", dtype=str, keep_default_na=False)
+    ov = pd.read_csv(m3.out_dir / "hubspot_changes_overview_2026-12.csv", sep=",", dtype=str, keep_default_na=False)
     assert ch["compscraper_business_status"].tolist() == ["scraper-geschlossen"] and ov["change"].tolist() == ["retired"]
-    assert ch["compscraper_closedondate"].tolist() == ["2026-11-03"]
-    assert not (m2.out_dir / "hubspot_import_2026-11.csv").exists()
-    api = json.loads((m2.out_dir / "hubspot_api_2026-11.json").read_text(encoding="utf-8"))
+    assert ch["compscraper_closedondate"].tolist() == ["2026-12-03"]
+    assert not (m3.out_dir / "hubspot_import_2026-12.csv").exists()
+    api = json.loads((m3.out_dir / "hubspot_api_2026-12.json").read_text(encoding="utf-8"))
     assert api["counts"] == {"new": 0, "reactivated": 0, "changed": 0, "retired": 1} and api["upsert"] == []
     assert not (m1.out_dir / "hubspot_api_2026-10.json").exists()  # a first import has no API file
+    from openpyxl import load_workbook
+    wb = load_workbook(m3.out_dir / "hubspot_changelog_2026-12.xlsx")
+    assert wb.sheetnames == ["Retired", "New", "Changed"]  # Reactivated only when there are any
+    head = ["PS-ID", "ÜO", "Name", "Operator", "Street", "PLZ", "City", "State", "Phone", "E-mail", "Website", "Google Maps"]
+    assert [c.value for c in wb["Retired"][1]] == head + ["Retired on"] and wb["Retired"].max_row == 2
+    assert wb["Retired"]["E2"].value and wb["Retired"]["M2"].value == "2026-12-03" and wb["Retired"]["L2"].hyperlink
+    assert wb["New"].max_row == 1 and [c.value for c in wb["Changed"][1]] == head + ["Fields changed"]
+    assert wb["Retired"]["A1"].font.bold and wb["Retired"].freeze_panes == "A2"
+    assert not (m1.out_dir / "hubspot_changelog_2026-10.xlsx").exists()
 
 
 def test_the_api_file_upserts_new_sites_updates_the_rest_and_never_sends_blanks():

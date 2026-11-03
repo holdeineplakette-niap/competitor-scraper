@@ -576,7 +576,9 @@ def build_record(out_dir: Path, summary: dict, root: Path) -> dict:
             "review_checks": [f"{c['check']}: {c['detail']}" for c in checks if not c["ok"] and c["severity"] == "review"],
             "changes": summary.get("diff"), "master_rows": summary.get("master_rows_total"),
             "lifecycle": {"new": lc.get("new"), "retired": len(lc.get("retired") or []), "reactivated": len(lc.get("reactivated") or []),
-                          "kept_active_not_refreshed": len(lc.get("not_refreshed") or [])},
+                          "kept_active_not_refreshed": len(lc.get("not_refreshed") or []),
+                          "missing_first_time": len(lc.get("missing") or []),  # one fresh run without them: retired after the next
+                          "duplicates_closed": len(lc.get("duplicates") or []), "kept_id": len(lc.get("continued") or [])},
             "error": summary.get("error", "")}
 
 

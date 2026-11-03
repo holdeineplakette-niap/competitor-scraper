@@ -1,9 +1,17 @@
 """Lifecycle of master rows across months: active -> retired -> (reactivated).
 
-Every master_id ever issued stays in the master. A row of the previous official master that gets no group this month:
-  * is RETIRED at once (no grace period) when every source behind it has a fresh input run this month;
-  * otherwise stays active, unchanged, flagged `not_refreshed:<sources>` (a stale or replaced input is not a closure).
-A retired row keeps its last known values, `status = retired`, `retired_on` = the first run that missed it. If its source
+Every master_id ever issued stays in the master. A row of the previous official master that gets no group this month
+(master_continuity has already given its id to a re-keyed or moved site where there is one):
+  * when every source behind it has a fresh input run, its `missed_runs` goes up by one; it is RETIRED only when that reaches
+    ms.RETIRE_AFTER_MISSED_RUNS (2: two fresh runs in a row without it, Nikos 2026-11-03). Until then it stays active with its
+    last values, so a one-off gap in a finder never reaches HubSpot;
+  * otherwise stays active, unchanged, flagged `not_refreshed:<sources>`, `missed_runs` unchanged (a stale or rejected input
+    is no evidence, so it neither counts nor resets);
+  * when master_ids merged it into another row (its source rows now belong to that row) it is retired at once and flagged
+    `duplicate_of:<id>`; a row retired by the count is flagged the same when an active row of its ÜO has its address. The
+    export lists those as CHANGED (a duplicate closed), never as RETIRED.
+Every row of this run has `missed_runs = 0`.
+A retired row keeps its last known values, `status = retired`, `retired_on` = the run that retired it. If its source
 rows come back (master_ids hands the same id to the group), it is ACTIVE again with `retired_on` cleared.
 
 `needs_review` is True ONLY for rows whose status changed in this run: reason `retired` or `reactivated`. It is cleared in
@@ -40,7 +48,10 @@ def with_lifecycle_columns(prev: pd.DataFrame) -> pd.DataFrame:
         out["status"] = "active"
     if "retired_on" not in out.columns:
         out["retired_on"] = ""
+    if "missed_runs" not in out.columns:
+        out["missed_runs"] = "0"
     out["status"] = out["status"].replace("", "active")
+    out["missed_runs"] = out["missed_runs"].fillna("0").replace("", "0")
     return out
 
 
@@ -55,11 +66,15 @@ def _addr(row) -> str:
     return nm.address_key(row["street"], row["zip"]) if nm.has_street(row["street"]) and row["zip"] else ""
 
 
-def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: dict[str, bool]) -> Lifecycle:
-    """`cur` = this run's rows (status active, needs_review False, from master_resolve.finish)."""
+def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: dict[str, bool],
+          merged_into: dict[str, str] | None = None) -> Lifecycle:
+    """`cur` = this run's rows (status active, needs_review False, from master_resolve.finish).
+    `merged_into` = {master_id: the id it was merged into} from master_ids.assign."""
     cur = cur.copy()
-    empty = {"new": 0, "retired": [], "reactivated": [], "carried_retired": 0, "not_refreshed": [], "rekey": [],
-             "retired_by_source": {}, "active_total": len(cur), "retired_total": 0, "rows_total": len(cur)}
+    cur["missed_runs"] = "0"
+    merged_into = merged_into or {}
+    empty = {"new": 0, "retired": [], "reactivated": [], "carried_retired": 0, "not_refreshed": [], "missing": [], "duplicates": [],
+             "rekey": [], "retired_by_source": {}, "active_total": len(cur), "retired_total": 0, "rows_total": len(cur)}
     if prev is None:
         return Lifecycle(cur.reset_index(drop=True), [], empty)
     prev = with_lifecycle_columns(prev)
@@ -77,6 +92,12 @@ def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: di
     carried: list[dict] = []
     retired_now: list[str] = []
     not_refreshed: list[dict] = []
+    missing: list[dict] = []
+    duplicates: list[dict] = []
+    active_by_addr: dict[tuple[str, str], str] = {}
+    for r in cur.sort_values("master_id").to_dict("records"):
+        if _addr(r):
+            active_by_addr.setdefault((r["uo"], _addr(r)), r["master_id"])
     carried_retired = 0
     by_source: dict[str, int] = {}
     for row in prev.to_dict("records"):
@@ -85,12 +106,23 @@ def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: di
             continue
         row = {c: row.get(c, "") for c in ms.MASTER_COLUMNS}
         row["needs_review"], row["needs_review_reason"] = "False", ""
+        missed = int(row.get("missed_runs") or 0)
         if prev_status[mid] == "retired":  # stays retired, unchanged; the flag of its retirement month is gone
             carried.append(row)
             carried_retired += 1
             continue
         sources = [s for s in row["listed_by"].split("|") if s]
         stale = [s for s in sources if not fresh.get(s, False)]
+        if mid in merged_into:  # its source rows belong to another row now: a duplicate, closed at once
+            _flag(row, f"duplicate_of:{merged_into[mid]}")
+            row.update(status="retired", retired_on=run_date, needs_review="True", needs_review_reason="retired")
+            carried.append(row)
+            retired_now.append(mid)
+            duplicates.append({"master_id": mid, "of": merged_into[mid]})
+            events.append({"master_id": mid, "location_ids": row["source_ids"], "action": "lifecycle", "rule": "duplicate_closed", "field": "",
+                           "chosen_source": "", "chosen_value": merged_into[mid], "dropped": "",
+                           "note": f"merged into {merged_into[mid]}: the duplicate is closed (exported as CHANGED)"})
+            continue
         if stale:
             _flag(row, "not_refreshed:" + "|".join(stale))
             carried.append(row)
@@ -99,13 +131,27 @@ def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: di
                            "chosen_source": "", "chosen_value": "", "dropped": "",
                            "note": f"not in this run, but the input of {', '.join(stale)} is stale or was replaced: kept active, not retired"})
             continue
+        missed += 1
+        row["missed_runs"] = str(missed)
+        if missed < ms.RETIRE_AFTER_MISSED_RUNS:  # not found in a fresh run, but not yet often enough: stays active
+            carried.append(row)
+            missing.append({"master_id": mid, "missed_runs": missed, "last_seen": row["last_seen"]})
+            events.append({"master_id": mid, "location_ids": row["source_ids"], "action": "lifecycle", "rule": "missing", "field": "",
+                           "chosen_source": "", "chosen_value": str(missed), "dropped": "",
+                           "note": f"not found in a fresh run ({missed} of {ms.RETIRE_AFTER_MISSED_RUNS}): kept active"})
+            continue
         row.update(status="retired", retired_on=run_date, needs_review="True", needs_review_reason="retired")
+        dup = active_by_addr.get((row["uo"], _addr(row))) if _addr(row) else None
+        if dup:  # another active row of its ÜO at its address: it was a duplicate, not a closure
+            _flag(row, f"duplicate_of:{dup}")
+            duplicates.append({"master_id": mid, "of": dup})
         carried.append(row)
         retired_now.append(mid)
         for s in sources:
             by_source[s] = by_source.get(s, 0) + 1
-        events.append({"master_id": mid, "location_ids": row["source_ids"], "action": "lifecycle", "rule": "retired", "field": "",
-                       "chosen_source": "", "chosen_value": run_date, "dropped": "", "note": "no source lists it any more (fresh inputs)"})
+        events.append({"master_id": mid, "location_ids": row["source_ids"], "action": "lifecycle", "rule": "duplicate_closed" if dup else "retired",
+                       "field": "", "chosen_source": "", "chosen_value": dup or run_date, "dropped": "",
+                       "note": f"not found in {missed} fresh runs in a row" + (f"; same address as {dup}: closed as its duplicate" if dup else "")})
 
     # re-keying: a site retired now and a brand-new id at the same address. Both are flagged, nothing is merged.
     prev_ids = set(prev["master_id"])
@@ -144,7 +190,7 @@ def apply(cur: pd.DataFrame, prev: pd.DataFrame | None, run_date: str, fresh: di
     full = pd.concat([cur, pd.DataFrame(carried, columns=ms.MASTER_COLUMNS)], ignore_index=True) if carried else cur
     full = full[ms.MASTER_COLUMNS].sort_values("master_id", kind="stable").reset_index(drop=True)
     info = {"new": len(new_rows), "retired": sorted(retired_now), "reactivated": reactivated, "carried_retired": carried_retired,
-            "not_refreshed": not_refreshed, "rekey": rekey, "retired_by_source": dict(sorted(by_source.items())),
+            "not_refreshed": not_refreshed, "missing": missing, "duplicates": duplicates, "rekey": rekey, "retired_by_source": dict(sorted(by_source.items())),
             "active_total": int((full["status"] == "active").sum()), "retired_total": int((full["status"] == "retired").sum()),
             "rows_total": len(full)}
     return Lifecycle(full, events, info)

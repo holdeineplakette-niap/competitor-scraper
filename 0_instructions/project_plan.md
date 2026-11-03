@@ -81,7 +81,7 @@ flowchart LR
 
 ### CSV schema
 
-The schema is fixed (37 columns, see `2_core/master_schema.py::MASTER_COLUMNS`). The master is CSV only (`;`, `.`, UTF-8 BOM, IDs and PLZ as text); there is no Excel copy. One row per physical site, `master_id` = `PS-000001`, stable across months and **never dropped**: a site that no source lists any more stays in the master with `status = retired` and `retired_on` (retired after one missed month, only when its sources have fresh inputs; it returns under the same id if it reappears). `needs_review` is True only for rows retired or reactivated in the current run; everything else that is in doubt is a token in `doubt_flags`. Details: `scraper_status.md`, item "Master lifecycle".
+The schema is fixed (38 columns, see `2_core/master_schema.py::MASTER_COLUMNS`). The master is CSV only (`;`, `.`, UTF-8 BOM, IDs and PLZ as text); there is no Excel copy. One row per physical site, `master_id` = `PS-000001`, stable across months and **never dropped**: a site that no source lists any more stays in the master with `status = retired` and `retired_on` (retired only after two fresh runs in a row without it, counted in `missed_runs`; a stale or rejected run does not count; it returns under the same id if it reappears). A site that got a new source id or moved within its town keeps its id (`2_core/master_continuity.py`); a duplicate is closed and exported as CHANGED. `needs_review` is True only for rows retired or reactivated in the current run; everything else that is in doubt is a token in `doubt_flags`. Details: `scraper_status.md`, items "Master lifecycle" and "Changelog classifier".
 
 The table below is the older candidate set of the source adapters, kept for reference; `master_schema.py` is authoritative.
 

@@ -140,8 +140,11 @@ def _near_plz(rec: dict, zip_: str, cent: dict | None) -> bool:
 
 
 def build(recs: list[dict], overrides: list[dict], merge_across_uo: bool = ms.MERGE_ACROSS_UO,
-          extra_same: list[tuple[str, str, str]] | None = None, cent: dict | None = None) -> Dedupe:
+          extra_same: list[tuple[str, str, str]] | None = None, cent: dict | None = None,
+          continuity_same: list[tuple[str, str, str]] | None = None) -> Dedupe:
     """`extra_same` = [(location_id_a, location_id_b, note)]: pairs the coordinate stage found to be the same site.
+    `continuity_same` = the same shape from master_continuity.join_pairs: listings of one source that belong to one row
+    across months (they need no strong evidence; a `different` override still wins).
     `cent` = {PLZ: (lat, lng)}: lets the street-only rule check a row's own coordinates against the candidate's PLZ."""
     n = len(recs)
     idx = {r["location_id"]: i for i, r in enumerate(recs)}
@@ -194,7 +197,7 @@ def build(recs: list[dict], overrides: list[dict], merge_across_uo: bool = ms.ME
             info["suppressed"].append(f"{recs[a]['location_id']} / {recs[b]['location_id']} ({rule})")
             return False
         pair = (min(a, b), max(a, b))
-        if rule not in ("override", "within_source_address") and pair not in by_pair and not can_join(a, b):
+        if rule not in ("override", "within_source_address", "continuity") and pair not in by_pair and not can_join(a, b):
             force_review(a, "would_join_unproven_rows_of_one_source")
             force_review(b, "would_join_unproven_rows_of_one_source")
             return False
@@ -320,6 +323,9 @@ def build(recs: list[dict], overrides: list[dict], merge_across_uo: bool = ms.ME
 
     for a_id, b_id, note in extra_same or []:
         add(idx[a_id], idx[b_id], "address_proximity", note)
+    for a_id, b_id, note in continuity_same or []:
+        if a_id in idx and b_id in idx:
+            add(idx[a_id], idx[b_id], "continuity", note)
 
     def components() -> tuple[list[list[int]], list[int]]:
         uf = _UF(n)

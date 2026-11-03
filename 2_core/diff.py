@@ -11,7 +11,7 @@ from core.geo import haversine_km
 MOVED_KM = 0.2  # coordinates count as changed only if they moved more than 200 m
 DIFF_COLUMNS = ["change", "master_id", "other_master_id", "field", "old", "new", "uo", "name", "street", "zip", "city"]
 # status changes get their own `retired` / `reactivated` lines; the review flag only mirrors them
-SKIP_FIELDS = {"master_id", "first_seen", "last_seen", "scraped_at", "status", "retired_on", "needs_review", "needs_review_reason"}
+SKIP_FIELDS = {"master_id", "first_seen", "last_seen", "missed_runs", "scraped_at", "status", "retired_on", "needs_review", "needs_review_reason"}
 
 
 def _addr(row) -> str:

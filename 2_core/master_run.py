@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 from core import dedupe, diff, geocode, geo, hdp_removal, paths
-from core import hubspot_export, master_ids, master_inputs as mi, master_lifecycle, master_records as mr, master_resolve as rs, master_schema as ms
+from core import hubspot_export, master_continuity as mc, master_ids, master_inputs as mi, master_lifecycle, master_records as mr, master_resolve as rs, master_schema as ms
 from core import normalise as nm
 
 MAX_CONTRIBUTION_DROP = 0.10
@@ -168,6 +168,9 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
         hdp_match = hdp_removal.match_sites(hdp_in.sites, [r for r in recs if r["slug"] == hdp_removal.KUES_SLUG])
         recs, hdp_removed = hdp_removal.split_recs(recs, hdp_match)
 
+    # listings of one source that belong to an existing row (a new listing at its address, or rows joined last month)
+    continuity_same = mc.join_pairs(recs, prev)
+
     gc = geocoder
     if gc is None:
         gc = geocode.Geocoder(paths.geocode_cache_path(root), contact=geocode.contact_from_env(root), live=live_geocoding)
@@ -175,7 +178,8 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
     try:
         try:
             for _pass in range(2):  # a second pass only if the coordinate stage found two sources' rows to be the same site
-                dd, groups, unresolved, rejected, auto_same = _build_groups(recs, overrides, across, extra_same, cent, states, known, gc)
+                dd, groups, unresolved, rejected, auto_same = _build_groups(recs, overrides, across, extra_same, cent, states, known, gc,
+                                                                            continuity_same)
                 if not auto_same:
                     break
                 extra_same = [(groups[p["a"]].recs[0]["location_id"], groups[p["b"]].recs[0]["location_id"],
@@ -242,18 +246,25 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
 
     prev_ids = {r["master_id"]: [x for x in r["source_ids"].split("|") if x] for r in prev.to_dict("records")} if prev is not None else {}
     ids, id_events = master_ids.assign([[r["location_id"] for r in g.recs] for g in groups], prev_ids, max_issued)
+    merged_into = {ev["master_id"]: ev["merged_into"] for ev in id_events if ev["event"] == "retired"}
+    # a site that got a new source id or moved keeps its master_id (master_continuity): CHANGED, not RETIRED + NEW
+    continued = mc.match(prev, pd.DataFrame([{**g.row, "master_id": mid} for g, mid in zip(groups, ids)], columns=ms.MASTER_COLUMNS),
+                         exclude=set(merged_into))
+    take = {c["new"]: c["old"] for c in continued}
+    ids = [take.get(mid, mid) for mid in ids]
     summary["max_master_id_issued"] = master_ids.fmt(max(master_ids.max_id(ids), max_issued))
     first_seen = dict(zip(prev["master_id"], prev["first_seen"])) if prev is not None else {}
     for g, mid in zip(groups, ids):
         g.row["master_id"] = mid
         g.row["first_seen"] = first_seen.get(mid) or run_date
         g.row["last_seen"] = run_date
+        g.row["missed_runs"] = "0"
     master = pd.DataFrame([g.row for g in groups], columns=ms.MASTER_COLUMNS).sort_values("master_id", kind="stable").reset_index(drop=True)
     mid_of = {g.gid: mid for g, mid in zip(groups, ids)}
     # lifecycle: rows of the previous master that no group claims are retired (or kept, if their input is stale); `master` stays
     # the rows of THIS run (the conservation checks count them), `master_all` is what is written
     fresh = master_lifecycle.fresh_sources(input_notes, MAX_INPUT_AGE_DAYS)
-    life = master_lifecycle.apply(master, prev, run_date, fresh)
+    life = master_lifecycle.apply(master, prev, run_date, fresh, merged_into)
     master_all = life.master
 
     # ---- logs
@@ -271,6 +282,9 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
         log_rows.append({"master_id": ev["master_id"], "location_ids": "", "action": "id",
                          "rule": "id_retired" if ev["event"] == "retired" else "id_split_new", "field": "", "chosen_source": "",
                          "chosen_value": ev.get("merged_into", ev.get("from", "")), "dropped": "", "note": ev["event"]})
+    for c in continued:
+        log_rows.append({"master_id": c["old"], "location_ids": "", "action": "id", "rule": f"continued_{c['verdict']}", "field": "",
+                         "chosen_source": "", "chosen_value": c["old"], "dropped": "", "note": f"{c['verdict']}: {c['note']}"})
     log_rows += life.events
     merge_log = pd.DataFrame(log_rows, columns=LOG_COLUMNS).sort_values(["master_id", "action", "rule", "field", "location_ids"], kind="stable").reset_index(drop=True)
 
@@ -298,7 +312,7 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
     summary.update(_summary(mode, started_at, month, selected, infos, recs, groups, dd, master, excluded, gc, geocoded, cache_written,
                             overrides, hdp_file_note, hdp_file_ids, extras, change, prev_path, unresolved, rejected, id_events, checks, include, across,
                             master_all=master_all))
-    summary["lifecycle"] = {**life.info, "fresh_sources": fresh}
+    summary["lifecycle"] = {**life.info, "fresh_sources": fresh, "continued": continued, "joined": len(continuity_same)}
     summary["master_rows_total"] = len(master_all)
     summary["input_notes"] = input_notes
     status = "PASS" if all(c["ok"] for c in checks if c["severity"] == "hard") else "FAIL"
@@ -311,9 +325,9 @@ def run(mode: str, root=None, started_at: datetime | None = None, confirm: bool 
     return RunResult(status, out_dir, master_all, summary, change, groups, recs)
 
 
-def _build_groups(recs, overrides, across, extra_same, cent, states, known, gc):
+def _build_groups(recs, overrides, across, extra_same, cent, states, known, gc, continuity_same=None):
     """Dedupe, resolve every group, geocode what still has no usable coordinates, then look for coordinate candidates."""
-    dd = dedupe.build(recs, overrides, across, extra_same, cent)
+    dd = dedupe.build(recs, overrides, across, extra_same, cent, continuity_same)
     groups: list[rs.Group] = []
     for gid, members in enumerate(dd.comps):
         agg: list[str] = []
@@ -451,7 +465,8 @@ def _validate(recs, groups, dd, master, infos, selected, excluded, prev, gc, inc
                          f"{len(zip_bad)} invalid, {len(unflagged)} of them not flagged"))
     if prev is not None:
         prev_active = master_lifecycle.with_lifecycle_columns(prev)
-        prev_active = prev_active[prev_active["status"] == "active"]
+        # rows the previous run found (a row missing since then was counted in that run's check already)
+        prev_active = prev_active[(prev_active["status"] == "active") & (prev_active["missed_runs"] == "0")]
         dropped = []
         for slug in mi.SOURCE_ORDER:
             now = sum(1 for s in master["listed_by"] if slug in s.split("|"))
@@ -630,6 +645,9 @@ def _write(mode, month, started_at, root, status, master, change, merge_log, ext
     api = hubspot_export.api_for_run(hub, month, tag)  # the same changes as API batches for n8n
     if api is not None:
         hubspot_export.write_api_json(api[1], out / api[0])
+    ov = hub.get(f"hubspot_changes_overview{tag}_{month}.csv")
+    if ov is not None:  # the overview formatted for Slack (n8n 03 posts it)
+        hubspot_export.write_changelog_xlsx(ov, master, out / hubspot_export.changelog_name(month, tag))
     write_csv(merge_log, out / "merge_log.csv")
     if hdp_frames is not None:
         write_csv(hdp_frames[0], out / hdp_removal.REMOVED_FILE)

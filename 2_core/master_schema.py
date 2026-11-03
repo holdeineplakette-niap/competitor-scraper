@@ -24,7 +24,7 @@ MASTER_COLUMNS = [
     "opening_hours", "services",
     "in_scope", "scope_reason", "doubt_flags", "needs_review", "needs_review_reason", "is_hdp_site",
     "status", "retired_on",
-    "scraped_at", "first_seen", "last_seen",
+    "scraped_at", "first_seen", "last_seen", "missed_runs",
 ]
 CONTACT_FIELDS = ("phone", "email", "website", "booking_url")
 # Decision (Nikos, 2026-10-08): `needs_review` is True ONLY for a row whose status changed in this run (closed list below).
@@ -33,7 +33,8 @@ REVIEW_REASONS = ("retired", "reactivated")  # closed list
 DOUBT_REASONS = ("match_candidate_unresolved", "coords_unresolved", "address_incomplete", "plz_invalid",
                  "hdp_match_unresolved", "hdp_own_site_kept", "ad_buero_at_station")  # closed list, tokens in doubt_flags
 STATUS_VALUES = ("active", "retired")
-LIFECYCLE_FLAGS = ("not_refreshed", "possibly_rekeyed")  # doubt-flag prefixes added after the merge (info, never needs_review)
+LIFECYCLE_FLAGS = ("not_refreshed", "possibly_rekeyed", "duplicate_of")  # doubt-flag prefixes added after the merge (info, never needs_review)
+RETIRE_AFTER_MISSED_RUNS = 2  # a site is retired only when this many fresh runs in a row did not find it (Nikos, 2026-11-03)
 
 # ---- families and fixed source order --------------------------------------------------------------------------
 FAMILIES = {"tuev_sued": "sued_hessen", "tuev_hessen": "sued_hessen", "tuev_rheinland": "rheinland_fsp", "fsp": "rheinland_fsp"}
