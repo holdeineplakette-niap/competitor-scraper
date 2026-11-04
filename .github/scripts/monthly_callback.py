@@ -30,6 +30,14 @@ def stopped(reason: str) -> dict:
     return {"exit_code": 2, "phase": "stopped", "needs_human": [reason]}
 
 
+def already_built(status: dict) -> dict:
+    """The timeout build found the month's master already built (TÜV SÜD came in time) and wrote nothing: one OK line instead
+    of the stored status, so its old needs-human list is not posted again and 02 asks for no HubSpot approval (only phase built)."""
+    master = Path((status.get("build") or {}).get("master_dir") or "?").name
+    return {"month": status.get("month"), "simulated": status.get("simulated", False), "exit_code": 0, "phase": "already_built",
+            "needs_human": [], "next_action": f"nothing to do: the master of {status.get('month')} was already built ({master})"}
+
+
 def pick_status_file(root: Path, run_month: str, started: float) -> tuple[Path | None, bool]:
     """(file, written by this run). Prefer run_month's file, then any file this run wrote, then the newest by month."""
     monthly = root / "3_master_output" / "_monthly"
@@ -92,6 +100,8 @@ def build(env: dict) -> tuple[dict, int]:
                 if code > int(status.get("exit_code") or 0):  # e.g. a traceback after the last status write
                     status.setdefault("needs_human", []).append(f"core.monthly exited {code}, the status file says {status.get('exit_code')}")
                     status["exit_code"] = code
+                elif command == "build-without-tuev-sued" and code == 0 and not fresh and status.get("phase") == "built":
+                    status = already_built(status)
     final = int(code_s) if code_s.isdigit() and not env.get("STOP_REASON") else 2  # the job ends with core.monthly's code
     if env.get("PUSH_OUTCOME") == "failure":
         status.setdefault("needs_human", []).append("data push to Google Drive failed: this run's files are not on the Drive")

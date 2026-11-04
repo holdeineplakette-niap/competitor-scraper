@@ -39,6 +39,7 @@ Header `X-Scraper-Token: ${{ secrets.N8N_CALLBACK_TOKEN }}`
 - If the status file is missing (crash before it was written), send `status: { "exit_code": 2, "phase": "stopped", "needs_human": ["<short error, no secrets>"] }`.
 - No personal data and no secrets in the payload (status.json is already clean; the snippets contain only TÜV SÜD / FSP query code).
 - n8n routes: snippet → .js file in Slack (`fsp_snippet.js` into the same thread when `fsp_snippet_js` is set); exit 0 → OK; exit 1 → needs human; exit 2 / anything else → stopped.
+- `build-without-tuev-sued` on a month whose master is already built (TÜV SÜD came in time; nothing written): the callback sends `status: { "month", "simulated", "exit_code": 0, "phase": "already_built", "needs_human": [], "next_action": "nothing to do: ..." }` instead of the stored status, so n8n posts one OK line and starts no HubSpot approval (approval only for phase `built`).
 - `fsp-check`: OK when `status.fsp.status` is `PASS`, else needs human. It never changes `status.phase` (may still be `built`), so n8n must never start the HubSpot approval for `fsp-check`.
 
 ## Details (checked against `core.monthly`, 2026-10-28)

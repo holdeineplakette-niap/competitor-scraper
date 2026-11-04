@@ -416,14 +416,30 @@ def fsp_upload(path, **summary):
     return path
 
 
-def callback_payload(root, command):
+def callback_payload(root, command, job_started="0"):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("monthly_callback", paths.code_root() / ".github" / "scripts" / "monthly_callback.py")
     cb = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cb)
-    payload, _ = cb.build({"COMMAND": command, "RUN_MONTH": "2026-11", "DATA_ROOT": str(root), "MONTHLY_CODE": "0", "JOB_STARTED": "0"})
+    payload, _ = cb.build({"COMMAND": command, "RUN_MONTH": "2026-11", "DATA_ROOT": str(root), "MONTHLY_CODE": "0", "JOB_STARTED": job_started})
     return payload
+
+
+def test_a_timeout_build_after_the_master_was_built_posts_one_ok_line(tmp_path):
+    d = paths.monthly_dir("2026-11", tmp_path)
+    d.mkdir(parents=True)
+    old = {"month": "2026-11", "simulated": False, "phase": "built", "exit_code": 1, "needs_human": ["FSP: run failed, not refreshed (BlockedError)"],
+           "next_action": "HubSpot write follows in Slack",
+           "build": {"status": "PASS", "master_dir": "3_master_output/2026-11-02_0830_official", "hubspot_api": "hubspot_api_2026-11.json"}}
+    f = d / paths.MONTHLY_STATUS_JSON
+    f.write_text(json.dumps(old), encoding="utf-8")
+    later = str(f.stat().st_mtime + 3600)  # the job started after the status file was written: this run wrote nothing
+    s = callback_payload(tmp_path, "build-without-tuev-sued", job_started=later)["status"]
+    assert s["phase"] == "already_built" and s["exit_code"] == 0 and s["needs_human"] == [] and "build" not in s
+    assert "2026-11-02_0830_official" in s["next_action"]
+    assert callback_payload(tmp_path, "build-without-tuev-sued")["status"]["phase"] == "built"  # written by this run: sent as it is
+    assert callback_payload(tmp_path, "status", job_started=later)["status"]["phase"] == "built"  # other commands: unchanged
 
 
 def test_fsp_is_not_scraped_on_the_runner():
